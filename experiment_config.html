@@ -23,6 +23,8 @@ button{border:0;background:var(--accent);color:#081d19;font-weight:700;padding:.
 button:disabled{opacity:.55;cursor:default}
 :focus-visible{outline:2px solid var(--accent);outline-offset:3px}
 pre{white-space:pre-wrap;overflow-wrap:anywhere;padding:.8rem;border-radius:.45rem;background:#0c131e;color:#d3e5f6;max-height:26rem;overflow:auto}
+.run-options{margin:1rem 0}.run-options input[type=checkbox]{display:inline;width:auto;margin:0 .4rem 0 0}
+.secondary{background:#26364a;color:var(--ink)}
 .status{color:var(--accent);margin:.4rem 0}.status[data-error=true]{color:#ffb2b2}
 @media(max-width:760px){.layout,.row{grid-template-columns:1fr}}
 </style>
@@ -36,6 +38,8 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;padding:.8rem;border-radius:.45r
 <label>Scenario
 <select id="preset">
 <option value="apple">YAM tabletop · apple into bowl</option>
+<option value="apple-both">Both YAM layouts · apple into bowl</option>
+<option value="apple-offset">YAM offset layout · apple into bowl</option>
 <option value="orange">YAM tabletop · orange into bowl</option>
 <option value="banana">YAM tabletop · banana onto plate</option>
 <option value="custom">Custom scene and task</option>
@@ -68,7 +72,17 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;padding:.8rem;border-radius:.45r
 <h2>Change preview</h2>
 <p id="status" class="status" role="status" aria-live="polite"></p>
 <pre id="preview"></pre>
-<button id="download" type="button">Download config</button>
+<button id="download" type="button" class="secondary">Download config</button>
+<fieldset class="run-options">
+<legend>Run locally</legend>
+<label><input id="viewer" type="checkbox" checked>Open live MuJoCo viewer</label>
+<label><input id="yolo" type="checkbox">Generate YOLO replay overlays</label>
+<label><input id="credits" type="checkbox">I confirm this run may use Dream-1 API credits</label>
+<button id="run" type="button" disabled>Run experiment</button>
+</fieldset>
+<p id="run-status" class="status" role="status" aria-live="polite"></p>
+<pre id="run-log" hidden></pre>
+<a id="report" hidden>Open report</a>
 </section>
 </div></main>
 <script>
@@ -76,6 +90,15 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;padding:.8rem;border-radius:.45r
 const presets = {
   apple: {
     scene: 'yam-tabletop-default', task: 'apple-in-bowl', scorer: 'apple-in-bowl-v1',
+    prompt: 'put apple into the bowl', goal: 'The released apple stays supported by the bowl and stable for at least 0.5 seconds.',
+  },
+  'apple-both': {
+    scene: 'yam-tabletop-default', scenes: ['yam-tabletop-default', 'yam-tabletop-offset'],
+    task: 'apple-in-bowl', scorer: 'apple-in-bowl-v1',
+    prompt: 'put apple into the bowl', goal: 'The released apple stays supported by the bowl and stable for at least 0.5 seconds.',
+  },
+  'apple-offset': {
+    scene: 'yam-tabletop-offset', task: 'apple-in-bowl', scorer: 'apple-in-bowl-v1',
     prompt: 'put apple into the bowl', goal: 'The released apple stays supported by the bowl and stable for at least 0.5 seconds.',
   },
   orange: {
@@ -98,6 +121,7 @@ const promptB = get('prompt-b');
 const actionsA = get('actions-a');
 const actionsB = get('actions-b');
 let snapshot = null;
+let activeJob = false;
 let candidatePrompt = '';
 let candidateActions = '24';
 
@@ -129,7 +153,7 @@ function update() {
   const successCondition = goal.value.trim();
   const same = a[variable.value] === b[variable.value];
   get('support').textContent = profile?.scorer
-    ? 'Automatic scoring available. Download this config to run it from the CLI.'
+    ? 'Automatic scoring available. Run it here or download the configuration for the CLI.'
     : 'Draft config. This task needs a scoring rule before automated regression.';
   let error = '';
   if (!form.checkValidity() || !a.prompt || !b.prompt || !scene || !task || !model || /\s/.test(model) || !successCondition) {
@@ -138,16 +162,18 @@ function update() {
     error = comparesPrompt ? 'Enter two different prompts.' : 'Enter two different action limits.';
   }
   snapshot = error ? null : {
-    schema_version: 1, scene_id: scene, task_id: task,
+    schema_version: 1, ...(profile?.scenes ? {scene_ids: profile.scenes} : {scene_id: scene}), task_id: task,
     success_condition: successCondition, scorer: profile?.scorer ?? null,
     model, seconds: get('seconds').valueAsNumber, comparison_variable: variable.value,
     baseline: a, candidate: b,
   };
   get('status').textContent = error || (comparesPrompt ? 'Prompt changed · action limit fixed' :
     'Action limit: ' + a.action_limit + ' → ' + b.action_limit + ' · prompt fixed');
+  if (snapshot && profile?.scenes) get('status').textContent += ' · ' + (profile.scenes.length * 2) + ' runs';
   get('status').dataset.error = String(Boolean(error));
   get('preview').textContent = snapshot ? JSON.stringify(snapshot, null, 2) : '';
   get('download').disabled = !snapshot;
+  get('run').disabled = activeJob || !snapshot?.scorer || !get('credits').checked;
 }
 
 preset.addEventListener('change', resetScenario);
@@ -171,5 +197,59 @@ get('download').addEventListener('click', () => {
   link.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 });
+async function poll(id) {
+  try {
+    const response = await fetch('/api/jobs/' + encodeURIComponent(id));
+    const job = await response.json();
+    if (!response.ok) throw new Error(job.error);
+    get('run-status').textContent = job.message + ' · ' + job.trials_started + '/' + job.trials_total + ' trials started';
+    get('run-log').hidden = !job.log.length;
+    get('run-log').textContent = job.log.join('\n');
+    if (job.status === 'running') {
+      setTimeout(() => poll(id), 1500);
+      return;
+    }
+    if (job.status === 'complete') {
+      get('report').href = '/?run=' + encodeURIComponent(job.report_id);
+      get('report').hidden = false;
+    }
+  } catch (error) {
+    get('run-status').textContent = error.message;
+  }
+  sessionStorage.removeItem('dreambench-job');
+  activeJob = false;
+  update();
+}
+
+get('credits').addEventListener('change', update);
+get('run').addEventListener('click', async () => {
+  if (!snapshot?.scorer || activeJob || !get('credits').checked) return;
+  const request = {config:snapshot, confirm_api_credits:true, viewer:get('viewer').checked, yolo:get('yolo').checked};
+  activeJob = true;
+  get('credits').checked = false;
+  update();
+  get('report').hidden = true;
+  get('run-log').hidden = true;
+  get('run-status').textContent = 'Submitting experiment…';
+  try {
+    const response = await fetch('/api/jobs', {
+      method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(request),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error);
+    sessionStorage.setItem('dreambench-job', result.id);
+    poll(result.id);
+  } catch (error) {
+    activeJob = false;
+    get('run-status').textContent = error.message;
+    update();
+  }
+});
 resetScenario();
+const previousJob = sessionStorage.getItem('dreambench-job');
+if (previousJob) {
+  activeJob = true;
+  update();
+  poll(previousJob);
+}
 </script></html>

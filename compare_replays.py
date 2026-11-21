@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from math import dist, isclose, isfinite
+from math import isclose, isfinite
 from pathlib import Path
 import re
 import subprocess
@@ -12,34 +12,35 @@ import sys
 import time
 from uuid import uuid4
 
-
-TASK = "put apple into the bowl"
-TASK_ID = "apple-in-bowl"
-SCENE_ID = "yam-tabletop-default"
-SCORER_ID = "apple-in-bowl-v1"
-SUCCESS_CONDITION = "The released apple stays supported by the bowl and stable for at least 0.5 seconds."
-STABLE_SECONDS = 0.50
-MAX_STABLE_MOTION_M = 0.008
-LIFT_M = 0.035
-# Conservative center region for the official bowl's 83 mm outer radius and 58 mm rim.
-INSIDE_RADIUS_M = 0.055
-MIN_CENTER_HEIGHT_M = 0.020
-MAX_CENTER_HEIGHT_M = 0.065
+from dreamlabs.scenarios import DEFAULT_SCENE_ID, SCENES
+from dreamlabs.scoring import SCORER_ID, SUCCESS_CONDITION, TASK, TASK_ID, TASKS, score, task_id
 
 
 def read_rows(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
 
-
 def load_config(path: Path) -> dict:
-    config = json.loads(path.read_text(encoding="utf-8"))
+    return validate_config(json.loads(path.read_text(encoding="utf-8")))
+
+
+def validate_config(config: object) -> dict:
     if not isinstance(config, dict) or type(config.get("schema_version")) is not int or config["schema_version"] != 1:
         raise ValueError("Use a schema version 1 experiment configuration from the Web workbench.")
-    if (config.get("scene_id"), config.get("task_id"), config.get("scorer")) != (SCENE_ID, TASK_ID, SCORER_ID):
-        raise ValueError("This scene and scorer pair is a draft. Only YAM apple-in-bowl is wired to the runner.")
-    if config.get("success_condition") != SUCCESS_CONDITION:
-        raise ValueError("The apple-in-bowl success condition must match the installed scorer.")
+    if "scene_id" in config and "scene_ids" in config:
+        raise ValueError("Specify scene_id or scene_ids, not both.")
+    scene_ids = config.get("scene_ids", [config.get("scene_id")])
+    if (not isinstance(scene_ids, list) or not scene_ids
+            or not all(isinstance(name, str) and name in SCENES for name in scene_ids)
+            or len(scene_ids) != len(set(scene_ids))):
+        raise ValueError("Choose distinct registered scenes.")
+    goal_id = config.get("task_id")
+    task = TASKS.get(goal_id) if isinstance(goal_id, str) else None
+    if (task is None or not all(goal_id in SCENES[name].task_ids for name in scene_ids)
+            or config.get("scorer") != task.scorer_id):
+        raise ValueError("This scene and scorer pair is a draft or has not been registered.")
+    if config.get("success_condition") != task.success_condition:
+        raise ValueError("The success condition must match the installed scorer.")
     variable = config.get("comparison_variable")
     if variable not in ("prompt", "action_limit"):
         raise ValueError("Choose prompt or action_limit as the comparison variable.")
@@ -65,58 +66,6 @@ def load_config(path: Path) -> dict:
     return config
 
 
-def task_id(metadata: dict) -> str | None:
-    if "task_id" in metadata:
-        return metadata["task_id"]
-    return TASK_ID if str(metadata.get("task", "")).strip().lower() == TASK else None
-
-def in_bowl(row: dict) -> bool:
-    objects = row["object_xyz_m"]
-    apple, bowl = objects["apple"], objects["bowl"]
-    contacts = row.get("apple_contacts", [])
-    return (
-        dist(apple[:2], bowl[:2]) <= INSIDE_RADIUS_M
-        and MIN_CENTER_HEIGHT_M <= apple[2] - bowl[2] <= MAX_CENTER_HEIGHT_M
-        and "bowl" in contacts
-        and not any(name.startswith(("left_", "right_")) for name in contacts)
-    )
-
-
-def score(rows: list[dict], metadata: dict) -> dict:
-    if (metadata.get("dry_run") or metadata.get("status") != "finished"
-            or metadata.get("recorder_exit_code", 0) != 0 or not rows):
-        return {"outcome": "invalid-run", "reason": "No completed task capture to score.", "evidence_sim_s": None}
-    if task_id(metadata) != TASK_ID:
-        return {"outcome": "unsupported-task", "reason": "The current rule scores only apple-in-bowl.", "evidence_sim_s": None}
-    if any("apple_contacts" not in row for row in rows):
-        return {"outcome": "insufficient-evidence", "reason": "Recording predates apple contact telemetry.", "evidence_sim_s": None}
-
-    # Use the final stable interval, so an apple later knocked out does not pass.
-    final = rows[-1]
-    final_apple = final["object_xyz_m"]["apple"]
-    start = final["sim_seconds"]
-    for row in reversed(rows):
-        apple = row["object_xyz_m"]["apple"]
-        if not in_bowl(row) or dist(apple, final_apple) > MAX_STABLE_MOTION_M:
-            break
-        start = row["sim_seconds"]
-    if final["sim_seconds"] - start >= STABLE_SECONDS - 1e-6:
-        return {"outcome": "success", "reason": "Apple finished supported by the bowl, clear of the arms, and stable.",
-                "evidence_sim_s": round(start + STABLE_SECONDS, 3)}
-
-    initial_height = rows[0]["object_xyz_m"]["apple"][2]
-    peak = max(rows, key=lambda row: row["object_xyz_m"]["apple"][2])
-    if peak["object_xyz_m"]["apple"][2] - initial_height < LIFT_M:
-        # Report an observable event, not a claim about the model's internal perception.
-        touched = next((row for row in rows if any(
-            name.startswith(("left_", "right_")) for name in row["apple_contacts"]
-        )), peak)
-        return {"outcome": "task-failure", "reason": "Apple never lifted at least 35 mm above its initial height.",
-                "evidence_sim_s": touched["sim_seconds"]}
-    return {"outcome": "task-failure", "reason": "Apple lifted but did not finish stable and released in the bowl.",
-            "evidence_sim_s": final["sim_seconds"]}
-
-
 def assess(folder: Path) -> dict:
     meta_path = folder / "run.json"
     metadata = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else {}
@@ -125,8 +74,9 @@ def assess(folder: Path) -> dict:
     result = score(rows, metadata)
     result.update({key: metadata.get(key) for key in ("task", "model", "actions", "seconds")})
     result.update(task_id=task_id(metadata), prompt=metadata.get("task"),
-                  scene_id=metadata.get("scene_id", SCENE_ID if task_id(metadata) == TASK_ID else None),
-                  scorer=metadata.get("scorer", SCORER_ID if task_id(metadata) == TASK_ID else None))
+                  scene_id=metadata.get("scene_id", DEFAULT_SCENE_ID if task_id(metadata) == TASK_ID else None),
+                  scorer=metadata.get("scorer", SCORER_ID if task_id(metadata) == TASK_ID else None),
+                  apple_offset_xyz_m=metadata.get("apple_offset_xyz_m"))
     result["initial_state"] = {
         key: rows[0][key] for key in ("object_xyz_m", "measured_joint_rad_and_gripper")
     } if rows else None
@@ -172,7 +122,7 @@ def run_trial(args: argparse.Namespace, parent: Path, config: dict, label: str) 
     launch = Path(sys.executable).with_name("mjpython") if sys.platform == "darwin" else Path(sys.executable)
     command = [str(launch), str(root / "record_replay.py"), "--output-dir", str(folder),
                f'--task={trial["prompt"]}', f'--model={config["model"]}', "--actions", str(actions),
-               "--seconds", str(config["seconds"])]
+               "--seconds", str(config["seconds"]), "--scene", config["scene_id"]]
     if not args.viewer:
         command.append("--headless")
     started = time.monotonic()
@@ -208,12 +158,66 @@ def run_trial(args: argparse.Namespace, parent: Path, config: dict, label: str) 
     return recording
 
 
+
+def pair_report(baseline: dict, candidate: dict) -> dict:
+    decision, reason = compare(baseline, candidate)
+    return {"decision": decision, "reason": reason, "baseline": baseline, "candidate": candidate}
+
+
+def print_pair(pair: dict) -> None:
+    for label in ("baseline", "candidate"):
+        result = pair[label]
+        evidence = result["evidence_sim_s"]
+        timestamp = f" at {evidence:.2f} s" if evidence is not None else ""
+        print(f"{label.title()}: {result['outcome']}{timestamp}. {result['reason']}")
+        if result["replay"]:
+            print(f"  Replay: {result['replay']}")
+    print(f"{pair['decision']}: {pair['reason']}")
+
+
+def run_pair(args: argparse.Namespace, folder: Path, config: dict) -> dict:
+    results = []
+    for label in ("baseline", "candidate"):
+        print(f"Trial: {config['scene_id']} · {label}", flush=True)
+        try:
+            result = assess(run_trial(args, folder, config, label))
+        except (OSError, ValueError, KeyError) as error:
+            result = {
+                "outcome": "run-error", "reason": str(error), "evidence_sim_s": None, "replay": None,
+                "actions": config[label]["action_limit"], "prompt": config[label]["prompt"],
+            }
+        results.append(result)
+    pair = pair_report(*results)
+    print_pair(pair)
+    return pair
+
+
+def summarize(pairs: list[dict]) -> dict:
+    valid = [pair for pair in pairs if pair["decision"] != "insufficient-evidence"]
+    wins = sum(pair["baseline"]["outcome"] == "task-failure" and pair["candidate"]["outcome"] == "success"
+               for pair in valid)
+    regressions = sum(pair["baseline"]["outcome"] == "success" and pair["candidate"]["outcome"] == "task-failure"
+                      for pair in valid)
+    counts = {label: sum(pair[label]["outcome"] == "success" for pair in valid)
+              for label in ("baseline", "candidate")}
+    if len(valid) != len(pairs):
+        decision, reason = "insufficient-evidence", "At least one scene did not produce a valid matched pair."
+    elif regressions:
+        decision, reason = "keep-baseline", "Candidate regressed on at least one tested scene."
+    elif wins:
+        decision, reason = "retest-candidate", "Candidate gained at least one pass without a detected regression. Repeat before adopting."
+    else:
+        decision, reason = "keep-baseline", "The task outcomes tied across the tested scenes."
+    return {"decision": decision, "reason": reason, "valid_pairs": len(valid),
+            "planned_pairs": len(pairs), "passes": counts}
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--existing", type=Path, nargs=2, metavar=("BASELINE", "CANDIDATE"),
                         help="Compare existing recordings without API calls")
     parser.add_argument("--run", action="store_true", help="Record two fresh Dream-1 runs (uses API credits)")
     parser.add_argument("--config", type=Path, help="Run the experiment exported from the Web workbench")
+    parser.add_argument("--scene", action="append", choices=tuple(SCENES), help="Scene for --run. Repeat to compare both layouts.")
     parser.add_argument("--model")
     parser.add_argument("--seconds", type=float)
     parser.add_argument("--baseline-actions", type=int)
@@ -224,11 +228,11 @@ def main() -> None:
     args = parser.parse_args()
     if sum(bool(mode) for mode in (args.run, args.existing, args.config)) != 1:
         parser.error("Choose --run, --config CONFIG, or --existing BASELINE CANDIDATE.")
-    overrides = (args.model, args.seconds, args.baseline_actions, args.candidate_actions)
+    overrides = (args.scene, args.model, args.seconds, args.baseline_actions, args.candidate_actions)
     config = None
     if args.config:
         if any(value is not None for value in overrides):
-            parser.error("Put model, time and action limits in the JSON when using --config.")
+            parser.error("Put scene, model, time and action limits in the JSON when using --config.")
         try:
             config = load_config(args.config)
         except (OSError, ValueError) as error:
@@ -240,8 +244,12 @@ def main() -> None:
         if (not isfinite(seconds) or seconds <= 0 or not 1 <= baseline_actions <= 48
                 or not 1 <= candidate_actions <= 48 or baseline_actions == candidate_actions):
             parser.error("Use a positive duration and two distinct action limits from 1 to 48.")
+        scene_ids = args.scene or [DEFAULT_SCENE_ID]
+        if len(scene_ids) != len(set(scene_ids)):
+            parser.error("Choose distinct scenes.")
+        scene_fields = {"scene_id": scene_ids[0]} if len(scene_ids) == 1 else {"scene_ids": scene_ids}
         config = {
-            "schema_version": 1, "scene_id": SCENE_ID, "task_id": TASK_ID, "scorer": SCORER_ID,
+            "schema_version": 1, **scene_fields, "task_id": TASK_ID, "scorer": SCORER_ID,
             "success_condition": SUCCESS_CONDITION, "model": args.model or "beta", "seconds": seconds,
             "comparison_variable": "action_limit",
             "baseline": {"prompt": TASK, "action_limit": baseline_actions},
@@ -250,25 +258,28 @@ def main() -> None:
 
     output = (args.output_dir / f"comparison-{uuid4().hex[:12]}").resolve()
     output.mkdir(parents=True)
-    if config is not None:
-        (output / "experiment.json").write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
-        folders = tuple(run_trial(args, output, config, label) for label in ("baseline", "candidate"))
+    if config is None:
+        report = pair_report(*map(assess, args.existing))
+        print_pair(report)
     else:
-        folders = args.existing
-    baseline, candidate = map(assess, folders)
-    decision, reason = compare(baseline, candidate)
-    report = {"decision": decision, "reason": reason, "baseline": baseline, "candidate": candidate}
-    if config is not None:
+        (output / "experiment.json").write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+        scene_ids = config.get("scene_ids") or [config["scene_id"]]
+        if len(scene_ids) == 1:
+            report = run_pair(args, output, {**config, "scene_id": scene_ids[0]})
+        else:
+            pairs = []
+            for scene_id in scene_ids:
+                print(f"\nScene: {scene_id}", flush=True)
+                scene_folder = output / scene_id
+                scene_folder.mkdir()
+                pair = run_pair(args, scene_folder, {**config, "scene_id": scene_id})
+                pairs.append({"scene_id": scene_id, **pair})
+            report = {**summarize(pairs), "scenes": pairs}
+            print(f"\n{report['decision']}: {report['reason']}")
         report["experiment"] = config
     path = output / "comparison.json"
     path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-    for label, result in (("Baseline", baseline), ("Candidate", candidate)):
-        evidence = result["evidence_sim_s"]
-        timestamp = f" at {evidence:.2f} s" if evidence is not None else ""
-        print(f"{label}: {result['outcome']}{timestamp}. {result['reason']}")
-        if result["replay"]:
-            print(f"  Replay: {result['replay']}")
-    print(f"{decision}: {reason}\nReport: {path}")
+    print(f"Report: {path}")
 
 
 if __name__ == "__main__":

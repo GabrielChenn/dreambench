@@ -2,6 +2,7 @@
 
 import argparse
 from contextlib import ExitStack
+from html import escape
 import importlib.util
 import json
 from pathlib import Path
@@ -12,32 +13,64 @@ from uuid import uuid4
 import av
 import numpy as np
 
+from dreamlabs.scenarios import DEFAULT_SCENE_ID, SCENES
+from dreamlabs.web_theme import WORKBENCH_CSS
+
 
 CAMERAS = ("top", "left", "right")
 
 
-def write_replay(path: Path, rows: list[dict], *, detections: list[dict] | None = None) -> None:
+CAMERA_LABELS = {"top": "Overhead", "left": "Left wrist", "right": "Right wrist"}
+REPLAY_CSS = """
+.panel{background:var(--surface);border:1px solid var(--line);border-radius:.9rem;padding:1.2rem;margin-top:1.25rem}
+header nav{display:flex;align-items:center;gap:1.2rem;flex-wrap:wrap}
+header a{font-weight:650}
+.video-wrap{position:relative;background:#080e17;border-radius:.55rem;overflow:hidden}
+video{display:block;width:100%;height:auto}
+canvas{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+.cameras{display:flex;margin-bottom:.6rem;gap:.4rem}
+.cameras span{flex:1;text-align:center;color:var(--muted);font-size:.875rem}
+.controls{display:flex;align-items:end;flex-wrap:wrap;gap:.65rem;margin-top:1rem}
+.controls label{display:grid;gap:.35rem;color:var(--muted);font-size:.875rem}
+input,button{font:inherit;border-radius:.45rem;padding:.45rem .7rem}
+input{width:8rem;color:var(--ink);background:#0c131e;border:1px solid #40516b;font-variant-numeric:tabular-nums}
+button{color:#081d19;background:var(--accent);border:1px solid transparent;font-weight:700;cursor:pointer}
+button:disabled{opacity:.55;cursor:default}
+output{display:block;color:var(--muted);margin-top:.75rem;font-size:.9rem;font-variant-numeric:tabular-nums}
+pre{background:#0c131e;border:1px solid var(--line);color:#d3e5f6;border-radius:.55rem;padding:1rem;overflow:auto;margin:0;max-height:28rem}
+@media(max-width:540px){.panel{padding:.8rem}.cameras span{font-size:.78rem}}
+"""
+
+
+def write_replay(
+    path: Path,
+    rows: list[dict],
+    *,
+    detections: list[dict] | None = None,
+    cameras: tuple[str, ...] = CAMERAS,
+) -> None:
     # Keep replay self-contained apart from its sibling video; file:// needs no server.
     payload = json.dumps(rows, allow_nan=False).replace("<", "\\u003c")
     detection_payload = json.dumps(detections, allow_nan=False).replace("<", "\\u003c")
+    camera_labels = "".join(f"<span>{escape(CAMERA_LABELS.get(camera, camera))}</span>" for camera in cameras)
     path.write_text(
-        """<!doctype html><html lang="en"><meta charset="utf-8">
-<title>DreamBench Replay</title>
-<style>
-body{font:16px system-ui;margin:2rem auto;max-width:1200px;padding:0 1rem}
-.video-wrap{position:relative}
-video{display:block;width:100%;background:#111}
-canvas{position:absolute;inset:0;width:100%;height:100%;pointer-events:none} pre{background:#f4f4f4;padding:1rem;overflow:auto}
-.cameras{display:grid;grid-template-columns:repeat(3,1fr);text-align:center;margin-bottom:.4rem}
-input{width:7em} output{margin-left:1em}
-</style>
-<h1>DreamBench Replay</h1>
-<p>Simulation time starts at zero. Inference waits are visible in the log's wall time.</p>
-<div class="cameras"><span>Overhead</span><span>Left wrist</span><span>Right wrist</span></div>
+        f"""<!doctype html><html lang="en"><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DreamBench Replay</title><style>{WORKBENCH_CSS}{REPLAY_CSS}</style>
+<header><nav aria-label="Workbench"><strong><span>◆</span>DreamBench</strong><a id="back" hidden>Back to results</a></nav></header>
+<main><h1>Simulation replay</h1>
+<p class="description">Inspect the camera views and telemetry on the same simulation timeline.</p>
+<section class="panel" aria-labelledby="video-title">
+<h2 id="video-title">Camera views</h2>
+<div class="cameras">{camera_labels}</div>
 <div class="video-wrap"><video id="video" src="video.mp4" controls preload="metadata"></video><canvas id="boxes" hidden></canvas></div>
-<p><label>Simulation time (s) <input id="seek" type="number" min="0" step="0.05"></label>
-<button id="jump">Jump</button><output id="position"></output></p>
+<form id="seek-form" class="controls"><label>Simulation time (s)<input id="seek" type="number" min="0" step="any" required></label>
+<button id="jump" type="submit" disabled>Jump</button></form>
+<output id="position"></output></section>
+<section class="panel" aria-labelledby="log-title">
+<h2 id="log-title">Frame telemetry</h2>
 <pre id="log"></pre>
+</section></main>
 <script id="rows" type="application/json">"""
         + payload
         + """</script>
@@ -53,6 +86,15 @@ const log = document.getElementById('log');
 const detections = JSON.parse(document.getElementById('detections').textContent);
 const canvas = document.getElementById('boxes');
 const context = canvas.getContext('2d');
+const back = document.getElementById('back');
+const [, route, experiment] = location.pathname.split('/');
+if (route === 'artifacts' && experiment?.startsWith('comparison-')) {
+  back.href = '/?' + new URLSearchParams({run: experiment});
+  back.hidden = false;
+} else if (location.pathname.startsWith('/artifacts/')) {
+  back.href = '/';
+  back.hidden = false;
+}
 canvas.hidden = !detections;
 function draw(record) {
   if (!detections || !video.videoWidth) return;
@@ -96,14 +138,18 @@ function show(seconds) {
   draw(detection);
   log.textContent = row ? JSON.stringify(detection ? {...row, detection} : row, null, 2) : '';
 }
-document.getElementById('jump').onclick = () => {
+document.getElementById('seek-form').addEventListener('submit', event => {
+  event.preventDefault();
   const seconds = seek.valueAsNumber;
   if (!rows.length || !Number.isFinite(seconds)) return;
   video.pause();
   video.currentTime = Math.max(0, Math.min(rows.at(-1).sim_seconds, seconds));
   show(video.currentTime);
-};
-video.addEventListener('loadedmetadata', () => show(video.currentTime));
+});
+video.addEventListener('loadedmetadata', () => {
+  document.getElementById('jump').disabled = !rows.length;
+  show(video.currentTime);
+});
 video.addEventListener('timeupdate', () => show(video.currentTime));
 video.addEventListener('seeked', () => show(video.currentTime));
 if (video.requestVideoFrameCallback) {
@@ -122,6 +168,8 @@ show(0);
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, default=Path("outputs"))
+    parser.add_argument("--scene", choices=tuple(SCENES), default=DEFAULT_SCENE_ID)
+    parser.add_argument("--check-reset", action="store_true", help="Check this scene twice without rendering or Dream-1")
     parser.add_argument("--task", default="put apple into the bowl")
     parser.add_argument("--model", default="beta")
     parser.add_argument("--actions", type=int, choices=range(1, 49), default=48, metavar="1–48")
@@ -135,8 +183,45 @@ def main() -> None:
         parser.error("Dream YAM Sim is missing. Run with ~/dream-env/bin/mjpython.")
     # The upstream example imports sibling modules by their bare module names.
     sys.path.insert(0, str(next(iter(spec.submodule_search_locations))))
+    import mujoco
+
     from dream_control import main as run_dream
     from yam_env import YamEnv
+
+    scene = SCENES[args.scene]
+
+    class SceneEnv(YamEnv):
+        def reset(self):
+            state = super().reset()
+            if any(scene.apple_offset_xyz_m):
+                self.data.joint("apple_free").qpos[:3] += scene.apple_offset_xyz_m
+                mujoco.mj_forward(self.model, self.data)
+            return state
+
+    if args.check_reset:
+        env = SceneEnv()
+        try:
+            def snapshot():
+                return {"qpos": env.data.qpos.tolist(), "qvel": env.data.qvel.tolist(),
+                        "apple_xyz_m": env.data.body("apple").xpos.tolist(),
+                        "bowl_xyz_m": env.data.body("bowl").xpos.tolist()}
+
+            env.reset()
+            first = snapshot()
+            env.data.joint("apple_free").qpos[0] += 0.01
+            state = env.state()
+            env.step(state["left"], state["right"])
+            env.reset()
+            if snapshot() != first:
+                raise RuntimeError(f"Scene reset is not repeatable: {args.scene}")
+            print(json.dumps({
+                "scene_id": args.scene, "apple_offset_xyz_m": scene.apple_offset_xyz_m,
+                "checks": 2, "identical_initial_state": True,
+                "apple_xyz_m": first["apple_xyz_m"], "bowl_xyz_m": first["bowl_xyz_m"],
+            }, indent=2))
+        finally:
+            env.close()
+        return
 
     output = args.output_dir / f"replay-{uuid4().hex[:12]}"
     output.mkdir(parents=True, exist_ok=False)
@@ -146,7 +231,7 @@ def main() -> None:
     origin_wall = None
     origin_sim = None
 
-    class RecordingEnv(YamEnv):
+    class RecordingEnv(SceneEnv):
         targets = None
 
         def step(self, left, right):
@@ -237,6 +322,7 @@ def main() -> None:
         metadata.update(
             status=status, frames=len(rows), fps=20, includes_warmup=True,
             video_camera_order=CAMERAS, video_layout="horizontal",
+            scene_id=args.scene, apple_offset_xyz_m=scene.apple_offset_xyz_m,
         )
         (output / "run.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
         if rows:
