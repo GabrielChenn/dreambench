@@ -1,40 +1,44 @@
 # DreamBench
 
-DreamBench is a HackLab Berlin project for Dream‑1 developers who want to know whether a workflow parameter change improves performance in simulation. The first milestone is a repeatable A/B test with automatic scoring and a report that supports a decision about whether to adopt the change.
+DreamBench is a local regression workbench for Dream-1 developers. Compare a prompt or execution setting in simulation, score the outcome from simulator state, and inspect the recorded evidence before adopting a change.
 
-## Project status
+## Current status
 
-- **Verified in simulation.** The team ran the official Dream Labs YAM/MuJoCo example and completed the apple-in-bowl task.
-- **Collaboration ready.** Shichen and Benjamin (`Benjamin0bug`) have access to this repository and can work through pull requests.
-- **Next milestone.** Run a baseline and a candidate from the same initial state with one command. Automatic scoring and report generation are planned.
+- One real apple-in-bowl comparison ran with identical recorded initial states, Dream-1 Beta, and a 120-second limit. The 48-action baseline failed and the 24-action candidate passed. The result calls for a repeat trial.
+- The local Web workbench opens saved comparisons and exports experiment JSON. The CLI accepts prompt or action-limit comparisons for apple-in-bowl. The prompt comparison path was verified with a mocked simulator.
+- The next milestone is one comparison across two reproducible scenes, with per-scene outcomes and replay links. Other tasks in the form are drafts until their simulator and scorer are registered.
 
-## First milestone
+## Quick start
 
-Use the validated apple-in-bowl scene to compare a baseline of up to **48 actions per model response** with a candidate of up to **24**. Keep the model, instruction, initial state, and time limit fixed. Store both configurations so either can be selected again.
-
-The report should show the applied configuration, whether the apple came to rest in the bowl after release, elapsed time, API call count, and an end frame. Record API and simulator errors separately from task outcomes. Verify that a second A/B run starts from the same state, and that switching back to the baseline restores the original setting. A tie is a valid result.
-
-The official example is the starting point for this milestone. The evaluation can also support an existing motion-planning workflow once it exposes reset, parameter setting, single-run execution, and outcome data.
-
-## Collaboration
-
-| Branch | Owner | Scope |
-| --- | --- | --- |
-| `codex/sim-integration` | Benjamin | Trace and verify reset, the execution parameter, and simulator state access. |
-| `codex/benchmark-runner` | Shichen | Validate the success rule, run paired trials, and generate the report. |
-
-Agree on the per-run result format before integrating. Use `docs/execution-path.md` to record source entry points and verification evidence as the investigation progresses. Merge through small pull requests into `main`.
-
-Once the A/B loop works, add a natural-language interface that produces a reviewable configuration diff and calls the same evaluation workflow.
-
-## Reproduce the simulator baseline
-
-In your existing Dream Labs Python environment, run `dreamcli example yam-mujoco`, then enter `Put apple into the bowl`. The team successfully completed this task in the official simulator.
-
-## Run the local scaffold tests
+Open the Web workbench from the repository root:
 
 ```sh
-python3 -m unittest discover -s tests -v
+python3 web_dashboard.py
 ```
 
-The local scaffold uses mocks. It provides the starting point for connecting the real simulator.
+Visit [the results page](http://127.0.0.1:8765/) or [configure an experiment](http://127.0.0.1:8765/configure). The workbench reads local reports and exports configurations without calling Dream-1. A clean checkout starts with an empty experiment list.
+
+To record a fresh comparison, download the JSON configuration and run it from the repository root with the Dream Labs environment:
+
+```sh
+source ~/dream-env/bin/activate
+python compare_replays.py --config ~/Downloads/dreambench-experiment.json --viewer
+```
+
+The command uses Dream-1 credits. Add `--yolo` if the local YOLO dependencies and weights are available. Each run saves its configuration, comparison report, trajectory, and replay under `outputs/`. Refresh the Workbench when the report is ready.
+
+Run the local scaffold tests with `python3 -m unittest discover -s tests -v`.
+
+## Repository map
+
+| Path | Responsibility |
+| --- | --- |
+| `web_dashboard.py`, `experiment_config.html` | Local results browser and experiment configuration |
+| `compare_replays.py` | Experiment validation, paired execution, scoring, and decision report |
+| `record_replay.py` | Dream YAM Sim integration, contacts, trajectories, and synchronized three-camera playback |
+| `detect_replay.py` | Optional offline YOLO annotations for replay |
+| `record_ab.py` | Manual A/B recording for spot checks |
+| `dreamlabs/`, `tests/` | Offline scaffold and tests |
+| `outputs/` | Local run artifacts, ignored by Git |
+
+Follow the [implementation and acceptance checklist](docs/ROADMAP.md). The [hackathon guide](Dream-1_回归测试台_指导方案.md) describes the project scope, judging criteria, and extended experiment design.

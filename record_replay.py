@@ -217,7 +217,7 @@ def main() -> None:
             env = RecordingEnv()
             stack.callback(env.close)
             options = [
-                "--task", args.task, "--model", args.model,
+                f"--task={args.task}", f"--model={args.model}",
                 "--actions", str(args.actions), "--seconds", str(args.seconds),
             ]
             if args.headless or args.dry_run:

@@ -1,5 +1,7 @@
 """Compare two apple-in-bowl recordings, or record both and compare in one command."""
 
+from __future__ import annotations
+
 import argparse
 import json
 from math import dist, isclose, isfinite
@@ -12,6 +14,10 @@ from uuid import uuid4
 
 
 TASK = "put apple into the bowl"
+TASK_ID = "apple-in-bowl"
+SCENE_ID = "yam-tabletop-default"
+SCORER_ID = "apple-in-bowl-v1"
+SUCCESS_CONDITION = "The released apple stays supported by the bowl and stable for at least 0.5 seconds."
 STABLE_SECONDS = 0.50
 MAX_STABLE_MOTION_M = 0.008
 LIFT_M = 0.035
@@ -24,6 +30,45 @@ MAX_CENTER_HEIGHT_M = 0.065
 def read_rows(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
+
+
+def load_config(path: Path) -> dict:
+    config = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(config, dict) or type(config.get("schema_version")) is not int or config["schema_version"] != 1:
+        raise ValueError("Use a schema version 1 experiment configuration from the Web workbench.")
+    if (config.get("scene_id"), config.get("task_id"), config.get("scorer")) != (SCENE_ID, TASK_ID, SCORER_ID):
+        raise ValueError("This scene and scorer pair is a draft. Only YAM apple-in-bowl is wired to the runner.")
+    if config.get("success_condition") != SUCCESS_CONDITION:
+        raise ValueError("The apple-in-bowl success condition must match the installed scorer.")
+    variable = config.get("comparison_variable")
+    if variable not in ("prompt", "action_limit"):
+        raise ValueError("Choose prompt or action_limit as the comparison variable.")
+    model, seconds = config.get("model"), config.get("seconds")
+    if not isinstance(model, str) or not model.strip() or any(char.isspace() for char in model) or len(model) > 100:
+        raise ValueError("Use a nonempty model identifier without spaces.")
+    if type(seconds) not in (int, float) or not 1 <= seconds <= 600:
+        raise ValueError("Use a time limit from 1 to 600 seconds.")
+    for name in ("baseline", "candidate"):
+        run = config.get(name)
+        if not isinstance(run, dict):
+            raise ValueError(f"Missing {name} configuration.")
+        prompt, limit = run.get("prompt"), run.get("action_limit")
+        if not isinstance(prompt, str) or not prompt.strip() or len(prompt.strip()) > 500:
+            raise ValueError(f"Enter a nonempty {name} prompt with no more than 500 characters.")
+        if type(limit) is not int or not 1 <= limit <= 48:
+            raise ValueError(f"Use an integer {name} action limit from 1 to 48.")
+        config[name] = {"prompt": prompt.strip(), "action_limit": limit}
+    changed = [field for field in ("prompt", "action_limit")
+               if config["baseline"][field] != config["candidate"][field]]
+    if changed != [variable]:
+        raise ValueError(f"Exactly one field must change: {variable}.")
+    return config
+
+
+def task_id(metadata: dict) -> str | None:
+    if "task_id" in metadata:
+        return metadata["task_id"]
+    return TASK_ID if str(metadata.get("task", "")).strip().lower() == TASK else None
 
 def in_bowl(row: dict) -> bool:
     objects = row["object_xyz_m"]
@@ -41,7 +86,7 @@ def score(rows: list[dict], metadata: dict) -> dict:
     if (metadata.get("dry_run") or metadata.get("status") != "finished"
             or metadata.get("recorder_exit_code", 0) != 0 or not rows):
         return {"outcome": "invalid-run", "reason": "No completed task capture to score.", "evidence_sim_s": None}
-    if metadata.get("task", "").strip().lower() != TASK:
+    if task_id(metadata) != TASK_ID:
         return {"outcome": "unsupported-task", "reason": "The current rule scores only apple-in-bowl.", "evidence_sim_s": None}
     if any("apple_contacts" not in row for row in rows):
         return {"outcome": "insufficient-evidence", "reason": "Recording predates apple contact telemetry.", "evidence_sim_s": None}
@@ -79,6 +124,9 @@ def assess(folder: Path) -> dict:
     rows = read_rows(track_path) if track_path.exists() else []
     result = score(rows, metadata)
     result.update({key: metadata.get(key) for key in ("task", "model", "actions", "seconds")})
+    result.update(task_id=task_id(metadata), prompt=metadata.get("task"),
+                  scene_id=metadata.get("scene_id", SCENE_ID if task_id(metadata) == TASK_ID else None),
+                  scorer=metadata.get("scorer", SCORER_ID if task_id(metadata) == TASK_ID else None))
     result["initial_state"] = {
         key: rows[0][key] for key in ("object_xyz_m", "measured_joint_rad_and_gripper")
     } if rows else None
@@ -100,11 +148,14 @@ def compare(baseline: dict, candidate: dict) -> tuple[str, str]:
     outcomes = baseline["outcome"], candidate["outcome"]
     if any(outcome not in ("success", "task-failure") for outcome in outcomes):
         return "insufficient-evidence", "Both runs need valid task scores."
-    for key in ("task", "model", "seconds", "initial_state"):
+    for key in ("task_id", "scene_id", "scorer", "model", "seconds", "initial_state"):
         if baseline[key] is None or baseline[key] != candidate[key]:
             return "insufficient-evidence", f"The recordings have missing or different {key}."
-    if baseline["actions"] is None or candidate["actions"] is None or baseline["actions"] == candidate["actions"]:
-        return "insufficient-evidence", "Use two distinct recorded action limits."
+    if any(run[key] is None for run in (baseline, candidate) for key in ("prompt", "actions")):
+        return "insufficient-evidence", "Missing prompt or action limit."
+    changed = sum(baseline[key] != candidate[key] for key in ("prompt", "actions"))
+    if changed != 1:
+        return "insufficient-evidence", "Exactly one of prompt and action limit must differ."
     if outcomes == ("task-failure", "success"):
         return "retest-candidate", "Candidate passed this pair. Repeat the paired trial before adopting."
     if outcomes == ("success", "task-failure"):
@@ -112,14 +163,16 @@ def compare(baseline: dict, candidate: dict) -> tuple[str, str]:
     return "keep-baseline", "The task outcomes tied on this pair."
 
 
-def run_trial(args: argparse.Namespace, parent: Path, actions: int) -> Path:
-    folder = parent / f"actions-{actions}"
+def run_trial(args: argparse.Namespace, parent: Path, config: dict, label: str) -> Path:
+    trial = config[label]
+    actions = trial["action_limit"]
+    folder = parent / label
     folder.mkdir()
     root = Path(__file__).resolve().parent
     launch = Path(sys.executable).with_name("mjpython") if sys.platform == "darwin" else Path(sys.executable)
     command = [str(launch), str(root / "record_replay.py"), "--output-dir", str(folder),
-               "--task", TASK, "--model", args.model, "--actions", str(actions),
-               "--seconds", str(args.seconds)]
+               f'--task={trial["prompt"]}', f'--model={config["model"]}', "--actions", str(actions),
+               "--seconds", str(config["seconds"])]
     if not args.viewer:
         command.append("--headless")
     started = time.monotonic()
@@ -143,7 +196,10 @@ def run_trial(args: argparse.Namespace, parent: Path, actions: int) -> Path:
     meta_path = recording / "run.json"
     if meta_path.exists():
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        meta.update(experiment_wall_elapsed_s=elapsed, reported_api_requests=requests, recorder_exit_code=code)
+        meta.update(
+            task_id=config["task_id"], scene_id=config["scene_id"], scorer=config["scorer"],
+            experiment_wall_elapsed_s=elapsed, reported_api_requests=requests, recorder_exit_code=code,
+        )
         meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
     if code == 0 and args.yolo:
         detector = [sys.executable, str(root / "detect_replay.py"), str(recording)]
@@ -157,27 +213,53 @@ def main() -> None:
     parser.add_argument("--existing", type=Path, nargs=2, metavar=("BASELINE", "CANDIDATE"),
                         help="Compare existing recordings without API calls")
     parser.add_argument("--run", action="store_true", help="Record two fresh Dream-1 runs (uses API credits)")
-    parser.add_argument("--model", default="beta")
-    parser.add_argument("--seconds", type=float, default=120)
-    parser.add_argument("--baseline-actions", type=int, default=48)
-    parser.add_argument("--candidate-actions", type=int, default=24)
+    parser.add_argument("--config", type=Path, help="Run the experiment exported from the Web workbench")
+    parser.add_argument("--model")
+    parser.add_argument("--seconds", type=float)
+    parser.add_argument("--baseline-actions", type=int)
+    parser.add_argument("--candidate-actions", type=int)
     parser.add_argument("--viewer", action="store_true", help="Open the MuJoCo viewer during each new run")
     parser.add_argument("--yolo", action="store_true", help="Run offline YOLO on each fresh recording")
     parser.add_argument("--output-dir", type=Path, default=Path("outputs"))
     args = parser.parse_args()
-    if args.run == bool(args.existing):
-        parser.error("Choose either --run or --existing BASELINE CANDIDATE.")
-    if args.run and (not isfinite(args.seconds) or args.seconds <= 0
-                     or not 1 <= args.baseline_actions <= 48 or not 1 <= args.candidate_actions <= 48
-                     or args.baseline_actions == args.candidate_actions):
-        parser.error("Use a positive duration and two distinct action limits from 1 to 48.")
+    if sum(bool(mode) for mode in (args.run, args.existing, args.config)) != 1:
+        parser.error("Choose --run, --config CONFIG, or --existing BASELINE CANDIDATE.")
+    overrides = (args.model, args.seconds, args.baseline_actions, args.candidate_actions)
+    config = None
+    if args.config:
+        if any(value is not None for value in overrides):
+            parser.error("Put model, time and action limits in the JSON when using --config.")
+        try:
+            config = load_config(args.config)
+        except (OSError, ValueError) as error:
+            parser.error(str(error))
+    elif args.run:
+        baseline_actions = 48 if args.baseline_actions is None else args.baseline_actions
+        candidate_actions = 24 if args.candidate_actions is None else args.candidate_actions
+        seconds = 120 if args.seconds is None else args.seconds
+        if (not isfinite(seconds) or seconds <= 0 or not 1 <= baseline_actions <= 48
+                or not 1 <= candidate_actions <= 48 or baseline_actions == candidate_actions):
+            parser.error("Use a positive duration and two distinct action limits from 1 to 48.")
+        config = {
+            "schema_version": 1, "scene_id": SCENE_ID, "task_id": TASK_ID, "scorer": SCORER_ID,
+            "success_condition": SUCCESS_CONDITION, "model": args.model or "beta", "seconds": seconds,
+            "comparison_variable": "action_limit",
+            "baseline": {"prompt": TASK, "action_limit": baseline_actions},
+            "candidate": {"prompt": TASK, "action_limit": candidate_actions},
+        }
+
     output = (args.output_dir / f"comparison-{uuid4().hex[:12]}").resolve()
     output.mkdir(parents=True)
-    folders = (run_trial(args, output, args.baseline_actions), run_trial(args, output, args.candidate_actions)
-               ) if args.run else args.existing
+    if config is not None:
+        (output / "experiment.json").write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+        folders = tuple(run_trial(args, output, config, label) for label in ("baseline", "candidate"))
+    else:
+        folders = args.existing
     baseline, candidate = map(assess, folders)
     decision, reason = compare(baseline, candidate)
     report = {"decision": decision, "reason": reason, "baseline": baseline, "candidate": candidate}
+    if config is not None:
+        report["experiment"] = config
     path = output / "comparison.json"
     path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     for label, result in (("Baseline", baseline), ("Candidate", candidate)):

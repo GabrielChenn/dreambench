@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Configure Experiment | DreamBench</title>
+<style>
+:root{color-scheme:dark;--surface:#141d2a;--line:#29384b;--ink:#f2f6fc;--muted:#a9b8cc;--accent:#78efca}
+*{box-sizing:border-box}body{margin:0;background:#0c131e;color:var(--ink);font:16px/1.55 system-ui,sans-serif}
+header{border-bottom:1px solid var(--line);padding:1rem max(1.3rem,calc((100% - 76rem)/2))}
+header nav{display:flex;gap:1.25rem;align-items:center}a{color:var(--accent)}
+main{max-width:76rem;margin:auto;padding:2.5rem 1.3rem 4rem}
+h1{font-size:clamp(2.35rem,5vw,4rem);line-height:1.08;letter-spacing:-.05em;margin:0}
+h2{font-size:1.15rem;margin:0 0 .65rem}.muted{color:var(--muted)}
+.layout{display:grid;grid-template-columns:minmax(0,1.45fr) minmax(0,1fr);gap:1rem;margin-top:1.75rem}
+section{background:var(--surface);border:1px solid var(--line);border-radius:.9rem;padding:1.15rem;align-self:start}
+fieldset{border:0;margin:0 0 1rem;padding:0}legend{font-weight:700;margin-bottom:.55rem;padding:0}
+label{display:block;margin-bottom:.7rem}input,select,textarea,button{font:inherit}
+input:not([type=radio]),select,textarea{display:block;width:100%;background:#0c131e;border:1px solid #40516b;color:var(--ink);border-radius:.45rem;padding:.48rem .64rem;margin-top:.25rem}
+input[readonly],textarea[readonly]{color:#adbdce;background:#1d293a}
+textarea{resize:vertical;min-height:4.7rem}select{appearance:none;background:#0c131e linear-gradient(45deg,transparent 50%,var(--muted) 50%) calc(100% - 16px) 50%/6px 6px no-repeat;padding-right:1.8rem}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:.8rem}
+button{border:0;background:var(--accent);color:#081d19;font-weight:700;padding:.55rem .85rem;border-radius:.45rem;cursor:pointer}
+button:disabled{opacity:.55;cursor:default}
+:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+pre{white-space:pre-wrap;overflow-wrap:anywhere;padding:.8rem;border-radius:.45rem;background:#0c131e;color:#d3e5f6;max-height:26rem;overflow:auto}
+.status{color:var(--accent);margin:.4rem 0}.status[data-error=true]{color:#ffb2b2}
+@media(max-width:760px){.layout,.row{grid-template-columns:1fr}}
+</style>
+<header><nav aria-label="Workbench"><strong>DreamBench</strong><a href="/">Results</a><a href="/configure" aria-current="page">Configure</a></nav></header>
+<main>
+<h1>Configure a regression</h1>
+<p class="muted">Choose a scene and a success condition, then compare one prompt or execution setting.</p>
+<div class="layout">
+<section aria-label="Experiment configuration">
+<form id="experiment">
+<label>Scenario
+<select id="preset">
+<option value="apple">YAM tabletop · apple into bowl</option>
+<option value="orange">YAM tabletop · orange into bowl</option>
+<option value="banana">YAM tabletop · banana onto plate</option>
+<option value="custom">Custom scene and task</option>
+</select></label>
+<div id="custom" hidden>
+<label>Scene identifier<input id="scene" maxlength="80" placeholder="e.g. lab-sorting-table-v1"></label>
+<label>Task identifier<input id="task" maxlength="80" placeholder="e.g. sort-inventory"></label>
+</div>
+<label>Success condition<textarea id="goal" maxlength="500" required></textarea></label>
+<p class="muted" id="support"></p>
+<label>Compare
+<select id="variable"><option value="action_limit">Actions executed per response</option><option value="prompt">Dream-1 prompt</option></select></label>
+<div class="row">
+<label>Model identifier<input id="model" value="beta" maxlength="100" required></label>
+<label>Time limit per run (s)<input id="seconds" type="number" min="1" max="600" value="120" required></label>
+</div>
+<div class="row">
+<fieldset><legend>Baseline</legend>
+<label>Baseline prompt<textarea id="prompt-a" maxlength="500" required></textarea></label>
+<label>Baseline action limit<input id="actions-a" type="number" min="1" max="48" value="48" required></label>
+</fieldset>
+<fieldset><legend>Candidate</legend>
+<label>Candidate prompt<textarea id="prompt-b" maxlength="500" required></textarea></label>
+<label>Candidate action limit<input id="actions-b" type="number" min="1" max="48" value="24" required></label>
+</fieldset>
+</div>
+</form>
+</section>
+<section aria-label="Configuration preview">
+<h2>Change preview</h2>
+<p id="status" class="status" role="status" aria-live="polite"></p>
+<pre id="preview"></pre>
+<button id="download" type="button">Download config</button>
+</section>
+</div></main>
+<script>
+'use strict';
+const presets = {
+  apple: {
+    scene: 'yam-tabletop-default', task: 'apple-in-bowl', scorer: 'apple-in-bowl-v1',
+    prompt: 'put apple into the bowl', goal: 'The released apple stays supported by the bowl and stable for at least 0.5 seconds.',
+  },
+  orange: {
+    scene: 'yam-tabletop-default', task: 'orange-in-bowl', scorer: null,
+    prompt: 'put orange into the bowl', goal: 'The released orange stays stable inside the bowl.',
+  },
+  banana: {
+    scene: 'yam-tabletop-default', task: 'banana-on-plate', scorer: null,
+    prompt: 'put banana on the plate', goal: 'The released banana stays stable on the plate.',
+  },
+};
+
+const get = id => document.getElementById(id);
+const form = get('experiment');
+const preset = get('preset');
+const variable = get('variable');
+const goal = get('goal');
+const promptA = get('prompt-a');
+const promptB = get('prompt-b');
+const actionsA = get('actions-a');
+const actionsB = get('actions-b');
+let snapshot = null;
+let candidatePrompt = '';
+let candidateActions = '24';
+
+function resetScenario() {
+  const profile = presets[preset.value];
+  get('custom').hidden = Boolean(profile);
+  get('scene').required = !profile;
+  get('task').required = !profile;
+  goal.readOnly = Boolean(profile?.scorer);
+  goal.value = profile?.goal ?? '';
+  promptA.value = profile?.prompt ?? '';
+  candidatePrompt = promptA.value;
+  promptB.value = candidatePrompt;
+  update();
+}
+
+function update() {
+  const profile = presets[preset.value];
+  const comparesPrompt = variable.value === 'prompt';
+  promptB.readOnly = !comparesPrompt;
+  actionsB.readOnly = comparesPrompt;
+  if (!comparesPrompt) promptB.value = promptA.value;
+  if (comparesPrompt) actionsB.value = actionsA.value;
+  const a = {prompt: promptA.value.trim(), action_limit: actionsA.valueAsNumber};
+  const b = {prompt: promptB.value.trim(), action_limit: actionsB.valueAsNumber};
+  const scene = profile?.scene ?? get('scene').value.trim();
+  const task = profile?.task ?? get('task').value.trim();
+  const model = get('model').value.trim();
+  const successCondition = goal.value.trim();
+  const same = a[variable.value] === b[variable.value];
+  get('support').textContent = profile?.scorer
+    ? 'Automatic scoring available. Download this config to run it from the CLI.'
+    : 'Draft config. This task needs a scoring rule before automated regression.';
+  let error = '';
+  if (!form.checkValidity() || !a.prompt || !b.prompt || !scene || !task || !model || /\s/.test(model) || !successCondition) {
+    error = 'Complete both configurations and use valid numeric limits.';
+  } else if (same) {
+    error = comparesPrompt ? 'Enter two different prompts.' : 'Enter two different action limits.';
+  }
+  snapshot = error ? null : {
+    schema_version: 1, scene_id: scene, task_id: task,
+    success_condition: successCondition, scorer: profile?.scorer ?? null,
+    model, seconds: get('seconds').valueAsNumber, comparison_variable: variable.value,
+    baseline: a, candidate: b,
+  };
+  get('status').textContent = error || (comparesPrompt ? 'Prompt changed · action limit fixed' :
+    'Action limit: ' + a.action_limit + ' → ' + b.action_limit + ' · prompt fixed');
+  get('status').dataset.error = String(Boolean(error));
+  get('preview').textContent = snapshot ? JSON.stringify(snapshot, null, 2) : '';
+  get('download').disabled = !snapshot;
+}
+
+preset.addEventListener('change', resetScenario);
+variable.addEventListener('change', () => {
+  if (variable.value === 'prompt') promptB.value = candidatePrompt;
+  else actionsB.value = candidateActions;
+  update();
+});
+form.addEventListener('input', event => {
+  if (event.target === promptB && !promptB.readOnly) candidatePrompt = promptB.value;
+  if (event.target === actionsB && !actionsB.readOnly) candidateActions = actionsB.value;
+  update();
+});
+form.addEventListener('submit', event => event.preventDefault());
+get('download').addEventListener('click', () => {
+  if (!snapshot) return;
+  const url = URL.createObjectURL(new Blob([JSON.stringify(snapshot, null, 2) + '\n'], {type:'application/json'}));
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = 'dreambench-experiment.json';
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+});
+resetScenario();
+</script></html>
