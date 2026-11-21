@@ -12,6 +12,8 @@ import sys
 import time
 from uuid import uuid4
 
+from dreamlabs.trajectory_quality import trajectory_quality
+from dreamlabs.contact_events import contact_summary
 from dreamlabs.scenarios import DEFAULT_SCENE_ID, SCENES
 from dreamlabs.scoring import SCORER_ID, SUCCESS_CONDITION, TASK, TASK_ID, TASKS, score, task_id
 
@@ -80,6 +82,8 @@ def assess(folder: Path) -> dict:
     result["initial_state"] = {
         key: rows[0][key] for key in ("object_xyz_m", "measured_joint_rad_and_gripper")
     } if rows else None
+    result["motion_quality"] = trajectory_quality(rows)
+    result["contact_summary"] = contact_summary(rows)
     result["wall_elapsed_s"] = metadata.get("experiment_wall_elapsed_s")
     result["reported_api_requests"] = metadata.get("reported_api_requests")
     yolo = folder / "detections-yolo.jsonl"
@@ -123,6 +127,8 @@ def run_trial(args: argparse.Namespace, parent: Path, config: dict, label: str) 
     command = [str(launch), str(root / "record_replay.py"), "--output-dir", str(folder),
                f'--task={trial["prompt"]}', f'--model={config["model"]}', "--actions", str(actions),
                "--seconds", str(config["seconds"]), "--scene", config["scene_id"]]
+    if args.viewport_jpeg:
+        command.extend(("--viewport-jpeg", str(args.viewport_jpeg)))
     if not args.viewer:
         command.append("--headless")
     started = time.monotonic()
@@ -222,6 +228,7 @@ def main() -> None:
     parser.add_argument("--seconds", type=float)
     parser.add_argument("--baseline-actions", type=int)
     parser.add_argument("--candidate-actions", type=int)
+    parser.add_argument("--viewport-jpeg", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--viewer", action="store_true", help="Open the MuJoCo viewer during each new run")
     parser.add_argument("--yolo", action="store_true", help="Run offline YOLO on each fresh recording")
     parser.add_argument("--output-dir", type=Path, default=Path("outputs"))

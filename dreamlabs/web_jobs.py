@@ -26,6 +26,7 @@ class ExperimentJobs:
         self.job: dict | None = None
         self.lines: deque[str] = deque(maxlen=30)
         self.process: subprocess.Popen | None = None
+        self.viewport: Path | None = None
         self.closed = False
 
     def start(self, config: dict, *, viewer: bool, yolo: bool) -> str:
@@ -36,6 +37,7 @@ class ExperimentJobs:
                 raise ValueError("Dream Labs Python is unavailable. Restart with --runner-python.")
             job_id = uuid4().hex
             self.lines.clear()
+            self.viewport = None
             self.job = {
                 "id": job_id, "status": "running", "message": "Starting the runner",
                 "trials_started": 0, "trials_total": 2 * len(config.get("scene_ids", [config.get("scene_id")])),
@@ -49,14 +51,25 @@ class ExperimentJobs:
                 return None
             return {**self.job, "log": list(self.lines)}
 
+    def viewport_frame(self, job_id: str) -> bytes | None:
+        with self.lock:
+            path = self.viewport if self.job and self.job["id"] == job_id else None
+        if path is None:
+            return None
+        try:
+            return path.read_bytes()
+        except FileNotFoundError:
+            return None
+
     def _run(self, config: dict, viewer: bool, yolo: bool) -> None:
         report_id = None
         try:
             with tempfile.TemporaryDirectory(prefix="dreambench-job-") as directory:
                 path = Path(directory) / "experiment.json"
                 path.write_text(json.dumps(config), encoding="utf-8")
+                viewport = Path(directory) / "viewport.jpg"
                 command = [str(self.python), "-u", str(self.script), "--config", str(path),
-                           "--output-dir", str(self.output_dir)]
+                           "--output-dir", str(self.output_dir), "--viewport-jpeg", str(viewport)]
                 if viewer:
                     command.append("--viewer")
                 if yolo:
@@ -64,6 +77,7 @@ class ExperimentJobs:
                 with self.lock:
                     if self.closed:
                         return
+                    self.viewport = viewport
                     self.process = subprocess.Popen(command, cwd=self.script.parent, stdin=subprocess.DEVNULL,
                                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                                     text=True, errors="replace", start_new_session=True)

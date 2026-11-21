@@ -25,6 +25,9 @@ button:disabled{opacity:.55;cursor:default}
 pre{white-space:pre-wrap;overflow-wrap:anywhere;padding:.8rem;border-radius:.45rem;background:#0c131e;color:#d3e5f6;max-height:26rem;overflow:auto}
 .run-options{margin:1rem 0}.run-options input[type=checkbox]{display:inline;width:auto;margin:0 .4rem 0 0}
 .secondary{background:#26364a;color:var(--ink)}
+.viewport-panel{margin-bottom:1rem}
+.viewport-panel img{display:block;width:100%;aspect-ratio:4/3;object-fit:contain;border-radius:.55rem;background:#080e17}
+.viewport-panel img[hidden]{display:none}
 .status{color:var(--accent);margin:.4rem 0}.status[data-error=true]{color:#ffb2b2}
 @media(max-width:760px){.layout,.row{grid-template-columns:1fr}}
 </style>
@@ -32,6 +35,11 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;padding:.8rem;border-radius:.45r
 <main>
 <h1>Configure a regression</h1>
 <p class="muted">Choose a scene and a success condition, then compare one prompt or execution setting.</p>
+<section id="viewport-panel" class="viewport-panel" hidden aria-labelledby="viewport-title">
+<h2 id="viewport-title">MuJoCo viewport</h2>
+<p id="viewport-status" class="muted">Waiting for the simulator…</p>
+<img id="viewport-image" alt="Live MuJoCo 3D view of both arms and the workbench" hidden>
+</section>
 <div class="layout">
 <section aria-label="Experiment configuration">
 <form id="experiment">
@@ -75,7 +83,12 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;padding:.8rem;border-radius:.45r
 <button id="download" type="button" class="secondary">Download config</button>
 <fieldset class="run-options">
 <legend>Run locally</legend>
-<label><input id="viewer" type="checkbox" checked>Open live MuJoCo viewer</label>
+<p id="connection" class="status" role="status">Checking the local server…</p>
+<p id="connection-help" class="muted" hidden>From the DreamBench folder, run
+<code>python3 web_dashboard.py</code>, then open the configuration page using the URL printed in your terminal.
+<a id="local-config" href="http://127.0.0.1:8765/configure" hidden>Open the local configuration page</a></p>
+<button id="reconnect" class="secondary" type="button" hidden>Check connection</button>
+<label><input id="viewer" type="checkbox">Also open the desktop MuJoCo window</label>
 <label><input id="yolo" type="checkbox">Generate YOLO replay overlays</label>
 <label><input id="credits" type="checkbox">I confirm this run may use Dream-1 API credits</label>
 <button id="run" type="button" disabled>Run experiment</button>
@@ -122,6 +135,11 @@ const actionsA = get('actions-a');
 const actionsB = get('actions-b');
 let snapshot = null;
 let activeJob = false;
+let viewportJob = null;
+let viewportUrl = null;
+let online = false;
+const servedLocally = location.protocol === 'http:' &&
+  ['127.0.0.1', 'localhost'].includes(location.hostname);
 let candidatePrompt = '';
 let candidateActions = '24';
 
@@ -173,7 +191,7 @@ function update() {
   get('status').dataset.error = String(Boolean(error));
   get('preview').textContent = snapshot ? JSON.stringify(snapshot, null, 2) : '';
   get('download').disabled = !snapshot;
-  get('run').disabled = activeJob || !snapshot?.scorer || !get('credits').checked;
+  get('run').disabled = activeJob;
 }
 
 preset.addEventListener('change', resetScenario);
@@ -197,14 +215,76 @@ get('download').addEventListener('click', () => {
   link.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 });
+function setConnection(connected, message) {
+  online = connected;
+  get('connection').textContent = message;
+  get('connection').dataset.error = String(!connected);
+  get('connection-help').hidden = connected;
+  get('reconnect').hidden = connected || !servedLocally;
+  get('local-config').hidden = servedLocally;
+  update();
+}
+
+async function checkConnection() {
+  if (!servedLocally) {
+    setConnection(false, 'Open this page through the local DreamBench server to start an experiment.');
+    return;
+  }
+  try {
+    const response = await fetch('/api/health', {cache:'no-store'});
+    if (!response.ok || (await response.json()).service !== 'dreambench') throw new Error();
+    setConnection(true, 'Local server connected');
+  } catch {
+    setConnection(false, 'Could not connect to DreamBench at ' + location.origin + '.');
+  }
+}
+
+async function readResponse(response) {
+  if (!response.headers.get('Content-Type')?.includes('application/json')) {
+    throw new Error('The server did not return a DreamBench response. Restart the workbench and reload this page.');
+  }
+  return response.json();
+}
+
+function showViewport(id) {
+  viewportJob = id;
+  get('viewport-panel').hidden = false;
+  get('viewport-image').hidden = true;
+  get('viewport-status').textContent = 'Waiting for the simulator…';
+  async function refresh() {
+    if (viewportJob !== id) return;
+    try {
+      const response = await fetch('/api/jobs/' + encodeURIComponent(id) + '/viewport.jpg', {cache:'no-store'});
+      if (response.ok && response.headers.get('Content-Type')?.startsWith('image/jpeg')) {
+        const blob = await response.blob();
+        if (viewportJob !== id) return;
+        const previousUrl = viewportUrl;
+        viewportUrl = URL.createObjectURL(blob);
+        get('viewport-image').src = viewportUrl;
+        get('viewport-image').hidden = false;
+        if (previousUrl) URL.revokeObjectURL(previousUrl);
+        get('viewport-status').textContent = 'Live 3D view';
+      } else if (response.status === 404) {
+        get('viewport-status').textContent = 'Viewport unavailable. Check the experiment status below.';
+      }
+    } catch {
+      if (viewportJob === id) get('viewport-status').textContent = 'Reconnecting to the viewport…';
+    }
+    if (viewportJob === id) setTimeout(refresh, 200);
+  }
+  refresh();
+}
+
 async function poll(id) {
   try {
     const response = await fetch('/api/jobs/' + encodeURIComponent(id));
-    const job = await response.json();
+    const job = await readResponse(response);
     if (!response.ok) throw new Error(job.error);
+    get('run-status').dataset.error = String(job.status === 'failed');
     get('run-status').textContent = job.message + ' · ' + job.trials_started + '/' + job.trials_total + ' trials started';
     get('run-log').hidden = !job.log.length;
     get('run-log').textContent = job.log.join('\n');
+    if (!online) setConnection(true, 'Local server connected');
     if (job.status === 'running') {
       setTimeout(() => poll(id), 1500);
       return;
@@ -214,7 +294,18 @@ async function poll(id) {
       get('report').hidden = false;
     }
   } catch (error) {
+    if (error instanceof TypeError) {
+      setConnection(false, 'Connection lost while checking the experiment. Reconnecting…');
+      setTimeout(() => poll(id), 3000);
+      return;
+    }
     get('run-status').textContent = error.message;
+  }
+  if (!online) checkConnection();
+  if (viewportJob === id) {
+    viewportJob = null;
+    const image = get('viewport-image');
+    get('viewport-status').textContent = image.hidden ? 'No viewport frames were received.' : 'Last recorded viewport';
   }
   sessionStorage.removeItem('dreambench-job');
   activeJob = false;
@@ -222,11 +313,33 @@ async function poll(id) {
 }
 
 get('credits').addEventListener('change', update);
+get('reconnect').addEventListener('click', checkConnection);
 get('run').addEventListener('click', async () => {
-  if (!snapshot?.scorer || activeJob || !get('credits').checked) return;
+  if (activeJob) return;
+  const runStatus = get('run-status');
+  runStatus.dataset.error = 'true';
+  if (!snapshot) {
+    runStatus.textContent = 'Fix the configuration before starting an experiment.';
+    return;
+  }
+  if (!snapshot.scorer) {
+    runStatus.textContent = 'Select a task with an automatic scoring rule to run an experiment.';
+    return;
+  }
+  if (!get('credits').checked) {
+    runStatus.textContent = 'Confirm Dream-1 API credit usage, then click Run experiment again.';
+    get('credits').focus();
+    return;
+  }
+  if (!online) await checkConnection();
+  if (activeJob) return;
+  if (!online) {
+    runStatus.textContent = 'Could not submit. Check the local DreamBench server and try again.';
+    return;
+  }
+  runStatus.dataset.error = 'false';
   const request = {config:snapshot, confirm_api_credits:true, viewer:get('viewer').checked, yolo:get('yolo').checked};
   activeJob = true;
-  get('credits').checked = false;
   update();
   get('report').hidden = true;
   get('run-log').hidden = true;
@@ -235,21 +348,31 @@ get('run').addEventListener('click', async () => {
     const response = await fetch('/api/jobs', {
       method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(request),
     });
-    const result = await response.json();
+    const result = await readResponse(response);
     if (!response.ok) throw new Error(result.error);
+    get('credits').checked = false;
     sessionStorage.setItem('dreambench-job', result.id);
+    showViewport(result.id);
     poll(result.id);
   } catch (error) {
     activeJob = false;
-    get('run-status').textContent = error.message;
+    get('run-status').dataset.error = 'true';
+    if (error instanceof TypeError) {
+      setConnection(false, 'Connection lost while submitting. Check the local server before retrying.');
+      get('run-status').textContent = 'Submission was not confirmed. No automatic retry was sent.';
+    } else {
+      get('run-status').textContent = error.message;
+    }
     update();
   }
 });
 resetScenario();
-const previousJob = sessionStorage.getItem('dreambench-job');
+checkConnection();
+const previousJob = servedLocally && sessionStorage.getItem('dreambench-job');
 if (previousJob) {
   activeJob = true;
   update();
+  showViewport(previousJob);
   poll(previousJob);
 }
 </script></html>

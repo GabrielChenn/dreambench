@@ -36,6 +36,7 @@ aside small{display:block;color:var(--muted);font-size:.85rem}
 strong.success{background:#16463a;color:#adf6dc}strong.task-failure{background:#4a2933;color:#ffc5d0}
 dl{margin:1rem 0;display:grid;gap:.5rem}dl div{display:flex;justify-content:space-between;gap:.75rem;border-bottom:1px solid var(--line);padding-bottom:.45rem}
 dt{color:var(--muted)}dd{margin:0;font-variant-numeric:tabular-nums;text-align:right}
+.motion h3{margin:1rem 0 .5rem;font-size:1rem}.motion dl{margin:.5rem 0}
 .link{display:inline-block;margin-top:1rem;font-weight:650}
 @media(max-width:820px){.layout{grid-template-columns:1fr}}
 @media(max-width:540px){.cards{grid-template-columns:1fr}}
@@ -104,12 +105,43 @@ def trial_card(root: Path, path: Path, label: str, trial: dict) -> str:
         ("Evidence time", value(trial.get("evidence_sim_s"), " s sim")),
     )
     rows = "".join(f"<div><dt>{key}</dt><dd>{metric}</dd></div>" for key, metric in metrics)
+    motion = trial.get("motion_quality")
+    quality = ""
+    if isinstance(motion, dict):
+        quality_metrics = (
+            ("Joint tracking RMSE", value(motion.get("tracking_rmse_rad"), " rad")),
+            ("Joint jerk P95", value(motion.get("joint_jerk_p95_rad_s3"), " rad/s³")),
+        )
+        quality_rows = "".join(f"<div><dt>{key}</dt><dd>{metric}</dd></div>" for key, metric in quality_metrics)
+        quality = (
+            f'<div class="motion"><h3>Motion quality</h3><dl>{quality_rows}</dl>'
+            '<p class="detail">Whole recording, including warm-up. Lower means less tracking error or jerk.</p></div>'
+        )
+    contacts = trial.get("contact_summary") or {}
+    contact_rows = ""
+    if contacts.get("sampled_frames"):
+        for category, name in (("grasp_contact", "Finger–fruit contacts"),
+                               ("arm_table", "Arm–table collisions"), ("arm_arm", "Arm–arm collisions")):
+            item = contacts["events"][category]
+            evidence = item["first_sim_s"]
+            timestamp = (f' · <a href="{escape(url)}?t={value(evidence)}">{value(evidence, " s sim")}</a>'
+                         if url and evidence is not None else "")
+            contact_rows += f'<div><dt>{name}</dt><dd>{value(item["events"])}{timestamp}</dd></div>'
+        peak = contacts.get("released_apple_bowl_peak")
+        peak_value = value(peak["normal_force_n"], " N") if peak else "—"
+        if peak and url:
+            peak_value += f' · <a href="{escape(url)}?t={value(peak["sim_s"])}">{value(peak["sim_s"], " s sim")}</a>'
+        contact_rows += f'<div><dt>Peak released apple–bowl normal force</dt><dd>{peak_value}</dd></div>'
+    contact_panel = '<div class="motion"><h3>Contact events</h3>'
+    contact_panel += (f'<dl>{contact_rows}</dl><p class="detail">Sampled at 20 Hz.</p>'
+                      if contact_rows else '<p class="detail">Contact telemetry unavailable for this recording.</p>')
+    contact_panel += '</div>'
     link = f'<a class="link" href="{escape(url)}">Open {label.lower()} replay</a>' if url else ""
     return (
         f'<article><div class="head"><h2>{label}</h2>'
         f'<strong class="pill {escape(outcome)}">{escape(OUTCOMES.get(outcome, outcome))}</strong></div>'
         f'<p class="detail">{value(trial.get("prompt", trial.get("task")))}</p>'
-        f'<dl>{rows}</dl><p class="detail">{value(trial.get("reason"))}</p>{link}</article>'
+        f'<dl>{rows}</dl><p class="detail">{value(trial.get("reason"))}</p>{quality}{contact_panel}{link}</article>'
     )
 
 
@@ -216,8 +248,26 @@ def make_handler(root: Path, jobs: ExperimentJobs) -> type[BaseHTTPRequestHandle
 
         def do_GET(self) -> None:
             request = urlsplit(self.path)
+            if request.path == "/api/health":
+                self.json_response(200, {"service": "dreambench"})
+                return
             if request.path.startswith("/api/jobs/"):
-                status = jobs.snapshot(request.path.removeprefix("/api/jobs/"))
+                job_id, separator, asset = request.path.removeprefix("/api/jobs/").partition("/")
+                if separator:
+                    if asset != "viewport.jpg" or jobs.snapshot(job_id) is None:
+                        self.send_error(404)
+                        return
+                    frame = jobs.viewport_frame(job_id)
+                    self.send_response(200 if frame else 204)
+                    self.send_header("Cache-Control", "no-store")
+                    if frame:
+                        self.send_header("Content-Type", "image/jpeg")
+                        self.send_header("Content-Length", str(len(frame)))
+                    self.end_headers()
+                    if frame:
+                        self.wfile.write(frame)
+                    return
+                status = jobs.snapshot(job_id)
                 if status is None:
                     self.json_response(404, {"error": "Run status is no longer available."})
                 else:
@@ -231,6 +281,7 @@ def make_handler(root: Path, jobs: ExperimentJobs) -> type[BaseHTTPRequestHandle
                     payload = dashboard(root, selected).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
                 self.send_header("Content-Length", str(len(payload)))
                 self.end_headers()
                 self.wfile.write(payload)

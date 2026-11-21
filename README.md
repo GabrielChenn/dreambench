@@ -69,3 +69,49 @@ You can also run the default 48 vs 24 comparison in both layouts directly:
 source ~/dream-env/bin/activate
 python compare_replays.py --run --scene yam-tabletop-default --scene yam-tabletop-offset --viewer
 ```
+
+## Motion quality in reports
+
+Each trial can report RMS tracking error between the recorded joint target and
+measured position, and the 95th percentile of absolute measured joint jerk.
+Both use the two arms' six joints, excluding the grippers. Jerk is estimated
+from consecutive 20 Hz simulation samples, with gaps excluded. Metrics cover
+the full recording, including warm-up, and are descriptive alongside task
+outcomes. Missing telemetry is shown as unavailable. These measurements do not
+evaluate collision severity or placement force.
+
+## Contact events and placement force
+
+New recordings sample active MuJoCo contacts at 20 Hz. The report separates
+finger–fruit contact from arm–table and inter-arm collisions. Consecutive
+sampled frames of the same category count as one event. The first event time
+links to replay. Older recordings display contact telemetry as unavailable.
+
+The apple–bowl metric is the peak sampled sum of contact-normal magnitudes
+when the apple has no detected arm contact. It is reported in newtons in
+simulation. A 20 Hz trace can miss short impacts, and this measurement is not
+a calibrated real-world force or a pass/fail threshold.
+
+## Inspect and reproduce one recorded frame
+
+Pause the replay, jump to a timestamp, or step through adjacent frames. The
+frame action table shows both arms' target and measured joint angles in radians
+and normalized gripper openings. Select **Download frame JSON** to save the
+full telemetry for the selected frame.
+
+New recordings include the MuJoCo integration state from before the recorded
+action. With the same MuJoCo version and YAM model, reproduce it offline:
+
+```sh
+source ~/dream-env/bin/activate
+python record_replay.py --reproduce-frame ~/Downloads/dreambench-frame-438.json
+```
+
+The command re-executes a single simulator step and compares its joint,
+gripper, and object positions with the recording. Older recordings can display
+and export their joint telemetry. They lack the physics snapshot required for
+single-step simulation reproduction.
+
+Web experiments show the live 3D MuJoCo viewport on the configuration page.
+It starts with the same camera angle as the desktop viewer. Enable the desktop
+window separately if you need its native controls.
