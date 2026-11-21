@@ -1,21 +1,35 @@
-"""Compare two apple-in-bowl recordings, or record both and compare in one command."""
+"""Compare two DreamBench recordings, or record both and compare in one command.
+
+The judged task comes from the prompt: "put orange into the bowl" is scored as orange-in-bowl. The
+eight object/container pairs of the YAM tabletop scene have calibrated scorers; any other pair uses
+the generic placement rule. Each trial gets a verdict (successed / failed / timeout stopped) and a
+diagnosis of what happened to the object.
+"""
 
 from __future__ import annotations
 
 import argparse
+from functools import partial
 import json
-from math import isclose, isfinite
+from math import isclose
 from pathlib import Path
 import re
 import subprocess
 import sys
 import time
+from typing import Callable
 from uuid import uuid4
 
-from dreamlabs.trajectory_quality import trajectory_quality
 from dreamlabs.contact_events import contact_summary
+from dreamlabs.home_watchdog import DEFAULT_HOME_SECONDS
 from dreamlabs.scenarios import DEFAULT_SCENE_ID, SCENES
-from dreamlabs.scoring import SCORER_ID, SUCCESS_CONDITION, TASK, TASK_ID, TASKS, score, task_id
+from dreamlabs.scene_inventory import load_inventory
+from dreamlabs.scoring import TASK, resolve_task, score, task_id, verdict
+from dreamlabs.task_parser import parse_prompt
+from dreamlabs.trajectory_quality import trajectory_quality
+
+MAX_HOME_SECONDS = 120.0
+TrialRunner = Callable[[Path, dict, str], Path]
 
 
 def read_rows(path: Path) -> list[dict]:
@@ -26,23 +40,42 @@ def load_config(path: Path) -> dict:
     return validate_config(json.loads(path.read_text(encoding="utf-8")))
 
 
+def resolve_config_task(config: dict) -> dict:
+    """Return the task fields for a configuration: from task_id if given, else from both prompts."""
+    goal_id = config.get("task_id")
+    if goal_id is not None:
+        if not isinstance(goal_id, str):
+            raise ValueError("Use a task identifier such as orange-in-bowl.")
+        spec = resolve_task(goal_id, config)
+        if spec is None:
+            raise ValueError(f"Cannot read task {goal_id!r}. Use <object>-in-<support> or <object>-on-<support>.")
+    else:
+        specs = [parse_prompt(config[name]["prompt"]) for name in ("baseline", "candidate")]
+        if specs[0].task_id != specs[1].task_id:
+            raise ValueError(f"Both prompts must ask for the same task: {specs[0].task_id} vs {specs[1].task_id}.")
+        spec = specs[0]
+    scene = load_inventory()
+    if spec.object not in scene.objects or spec.target not in scene.supports:
+        raise ValueError(f"The scene has no {spec.object!r} or {spec.target!r}.")
+    for key, expected in (("scorer", spec.scorer), ("success_condition", spec.success_condition)):
+        if key in config and config[key] != expected:
+            raise ValueError(f"The {key.replace('_', ' ')} must match the installed scorer for {spec.task_id}.")
+    return {"task_id": spec.task_id, "object": spec.object, "target": spec.target, "scorer": spec.scorer,
+            "tier": spec.tier, "success_condition": spec.success_condition}
+
+
 def validate_config(config: object) -> dict:
     if not isinstance(config, dict) or type(config.get("schema_version")) is not int or config["schema_version"] != 1:
         raise ValueError("Use a schema version 1 experiment configuration from the Web workbench.")
     if "scene_id" in config and "scene_ids" in config:
         raise ValueError("Specify scene_id or scene_ids, not both.")
+    if "scene_id" not in config and "scene_ids" not in config:
+        config["scene_id"] = DEFAULT_SCENE_ID
     scene_ids = config.get("scene_ids", [config.get("scene_id")])
     if (not isinstance(scene_ids, list) or not scene_ids
             or not all(isinstance(name, str) and name in SCENES for name in scene_ids)
             or len(scene_ids) != len(set(scene_ids))):
         raise ValueError("Choose distinct registered scenes.")
-    goal_id = config.get("task_id")
-    task = TASKS.get(goal_id) if isinstance(goal_id, str) else None
-    if (task is None or not all(goal_id in SCENES[name].task_ids for name in scene_ids)
-            or config.get("scorer") != task.scorer_id):
-        raise ValueError("This scene and scorer pair is a draft or has not been registered.")
-    if config.get("success_condition") != task.success_condition:
-        raise ValueError("The success condition must match the installed scorer.")
     variable = config.get("comparison_variable")
     if variable not in ("prompt", "action_limit"):
         raise ValueError("Choose prompt or action_limit as the comparison variable.")
@@ -51,6 +84,10 @@ def validate_config(config: object) -> dict:
         raise ValueError("Use a nonempty model identifier without spaces.")
     if type(seconds) not in (int, float) or not 1 <= seconds <= 600:
         raise ValueError("Use a time limit from 1 to 600 seconds.")
+    home = config.get("auto_stop_home_seconds")
+    if home is not None and (type(home) not in (int, float) or not (home == 0 or 0.5 <= home <= MAX_HOME_SECONDS)):
+        raise ValueError(f"Use 0 (off) or 0.5 to {MAX_HOME_SECONDS:g} seconds for the home auto-stop.")
+    config["auto_stop_home_seconds"] = home or None
     for name in ("baseline", "candidate"):
         run = config.get(name)
         if not isinstance(run, dict):
@@ -58,6 +95,8 @@ def validate_config(config: object) -> dict:
         prompt, limit = run.get("prompt"), run.get("action_limit")
         if not isinstance(prompt, str) or not prompt.strip() or len(prompt.strip()) > 500:
             raise ValueError(f"Enter a nonempty {name} prompt with no more than 500 characters.")
+        if "\n" in prompt or "\r" in prompt:
+            raise ValueError(f"Keep the {name} prompt on one line.")
         if type(limit) is not int or not 1 <= limit <= 48:
             raise ValueError(f"Use an integer {name} action limit from 1 to 48.")
         config[name] = {"prompt": prompt.strip(), "action_limit": limit}
@@ -65,6 +104,7 @@ def validate_config(config: object) -> dict:
                if config["baseline"][field] != config["candidate"][field]]
     if changed != [variable]:
         raise ValueError(f"Exactly one field must change: {variable}.")
+    config.update(resolve_config_task(config))
     return config
 
 
@@ -74,11 +114,14 @@ def assess(folder: Path) -> dict:
     track_path = folder / "trajectory.jsonl"
     rows = read_rows(track_path) if track_path.exists() else []
     result = score(rows, metadata)
+    spec = resolve_task(task_id(metadata), metadata)
     result.update({key: metadata.get(key) for key in ("task", "model", "actions", "seconds")})
     result.update(task_id=task_id(metadata), prompt=metadata.get("task"),
-                  scene_id=metadata.get("scene_id", DEFAULT_SCENE_ID if task_id(metadata) == TASK_ID else None),
-                  scorer=metadata.get("scorer", SCORER_ID if task_id(metadata) == TASK_ID else None),
-                  apple_offset_xyz_m=metadata.get("apple_offset_xyz_m"))
+                  scene_id=metadata.get("scene_id", DEFAULT_SCENE_ID if spec else None),
+                  scorer=metadata.get("scorer", spec.scorer if spec else None),
+                  apple_offset_xyz_m=metadata.get("apple_offset_xyz_m"),
+                  stop_reason=metadata.get("stop_reason"), home_rule=metadata.get("home_rule"))
+    result["verdict"] = verdict(result["outcome"], result["stop_reason"])
     result["initial_state"] = {
         key: rows[0][key] for key in ("object_xyz_m", "measured_joint_rad_and_gripper")
     } if rows else None
@@ -117,7 +160,13 @@ def compare(baseline: dict, candidate: dict) -> tuple[str, str]:
     return "keep-baseline", "The task outcomes tied on this pair."
 
 
+def trial_metadata(config: dict) -> dict:
+    """Fields every trial's run.json carries so it can be scored without the experiment file."""
+    return {key: config[key] for key in ("task_id", "object", "target", "scene_id", "scorer")}
+
+
 def run_trial(args: argparse.Namespace, parent: Path, config: dict, label: str) -> Path:
+    """Record one trial in a fresh record_replay.py process."""
     trial = config[label]
     actions = trial["action_limit"]
     folder = parent / label
@@ -127,6 +176,8 @@ def run_trial(args: argparse.Namespace, parent: Path, config: dict, label: str) 
     command = [str(launch), str(root / "record_replay.py"), "--output-dir", str(folder),
                f'--task={trial["prompt"]}', f'--model={config["model"]}', "--actions", str(actions),
                "--seconds", str(config["seconds"]), "--scene", config["scene_id"]]
+    if config.get("auto_stop_home_seconds"):
+        command.extend(("--home-seconds", str(config["auto_stop_home_seconds"])))
     if args.viewport_jpeg:
         command.extend(("--viewport-jpeg", str(args.viewport_jpeg)))
     if not args.viewer:
@@ -140,9 +191,7 @@ def run_trial(args: argparse.Namespace, parent: Path, config: dict, label: str) 
             for line in process.stdout:
                 print(line, end="", flush=True)
                 log.write(line)
-                match = re.search(r"· (\d+) requests? ·", line)
-                if match:
-                    requests = int(match.group(1))
+                requests = request_count(line, requests)
             code = process.wait()
     elapsed = round(time.monotonic() - started, 3)
     recordings = list(folder.glob("replay-*"))
@@ -152,17 +201,23 @@ def run_trial(args: argparse.Namespace, parent: Path, config: dict, label: str) 
     meta_path = recording / "run.json"
     if meta_path.exists():
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        meta.update(
-            task_id=config["task_id"], scene_id=config["scene_id"], scorer=config["scorer"],
-            experiment_wall_elapsed_s=elapsed, reported_api_requests=requests, recorder_exit_code=code,
-        )
+        meta.update(trial_metadata(config), experiment_wall_elapsed_s=elapsed,
+                    reported_api_requests=requests, recorder_exit_code=code)
         meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
     if code == 0 and args.yolo:
-        detector = [sys.executable, str(root / "detect_replay.py"), str(recording)]
-        if subprocess.run(detector, check=False).returncode:
-            print("YOLO did not complete. The simulation score is still available.", file=sys.stderr)
+        run_yolo(recording)
     return recording
 
+
+def request_count(line: str, current: int | None) -> int | None:
+    match = re.search(r"· (\d+) requests? ·", line)
+    return int(match.group(1)) if match else current
+
+
+def run_yolo(recording: Path) -> None:
+    detector = [sys.executable, str(Path(__file__).resolve().with_name("detect_replay.py")), str(recording)]
+    if subprocess.run(detector, check=False).returncode:
+        print("YOLO did not complete. The simulation score is still available.", file=sys.stderr)
 
 
 def pair_report(baseline: dict, candidate: dict) -> dict:
@@ -175,23 +230,32 @@ def print_pair(pair: dict) -> None:
         result = pair[label]
         evidence = result["evidence_sim_s"]
         timestamp = f" at {evidence:.2f} s" if evidence is not None else ""
-        print(f"{label.title()}: {result['outcome']}{timestamp}. {result['reason']}")
+        print(f"{label.title()}: {result.get('verdict') or result['outcome']}{timestamp}. {result['reason']}")
+        if result.get("diagnostics"):
+            print(f"  What happened: {result['diagnostics']['summary']}")
         if result["replay"]:
             print(f"  Replay: {result['replay']}")
     print(f"{pair['decision']}: {pair['reason']}")
 
 
-def run_pair(args: argparse.Namespace, folder: Path, config: dict) -> dict:
+def unavailable(config: dict, label: str, outcome: str, reason: str) -> dict:
+    return {"outcome": outcome, "verdict": None if outcome == "not-run" else "failed", "reason": reason,
+            "evidence_sim_s": None, "replay": None,
+            "actions": config[label]["action_limit"], "prompt": config[label]["prompt"]}
+
+
+def run_pair(folder: Path, config: dict, trial_runner: TrialRunner,
+             stopped: Callable[[], bool] = lambda: False) -> dict:
     results = []
     for label in ("baseline", "candidate"):
+        if stopped():
+            results.append(unavailable(config, label, "not-run", "The experiment was stopped before this trial."))
+            continue
         print(f"Trial: {config['scene_id']} · {label}", flush=True)
         try:
-            result = assess(run_trial(args, folder, config, label))
-        except (OSError, ValueError, KeyError) as error:
-            result = {
-                "outcome": "run-error", "reason": str(error), "evidence_sim_s": None, "replay": None,
-                "actions": config[label]["action_limit"], "prompt": config[label]["prompt"],
-            }
+            result = assess(trial_runner(folder, config, label))
+        except (OSError, ValueError, KeyError, RuntimeError) as error:
+            result = unavailable(config, label, "run-error", str(error) or type(error).__name__)
         results.append(result)
     pair = pair_report(*results)
     print_pair(pair)
@@ -217,6 +281,35 @@ def summarize(pairs: list[dict]) -> dict:
     return {"decision": decision, "reason": reason, "valid_pairs": len(valid),
             "planned_pairs": len(pairs), "passes": counts}
 
+
+def run_experiment(config: dict, output: Path, trial_runner: TrialRunner,
+                   stopped: Callable[[], bool] = lambda: False) -> Path:
+    """Run every scene's baseline/candidate pair, write comparison.json, and return its path."""
+    output.mkdir(parents=True)
+    (output / "experiment.json").write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+    scene_ids = config.get("scene_ids") or [config["scene_id"]]
+    if len(scene_ids) == 1:
+        report = run_pair(output, {**config, "scene_id": scene_ids[0]}, trial_runner, stopped)
+    else:
+        pairs = []
+        for scene_id in scene_ids:
+            print(f"\nScene: {scene_id}", flush=True)
+            scene_folder = output / scene_id
+            scene_folder.mkdir()
+            pair = run_pair(scene_folder, {**config, "scene_id": scene_id}, trial_runner, stopped)
+            pairs.append({"scene_id": scene_id, **pair})
+        report = {**summarize(pairs), "scenes": pairs}
+        print(f"\n{report['decision']}: {report['reason']}")
+    if stopped():
+        report["stopped"] = True
+        report["reason"] = "Stopped by the operator. " + report["reason"]
+    report["experiment"] = config
+    path = output / "comparison.json"
+    path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    print(f"Report: {path}", flush=True)
+    return path
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--existing", type=Path, nargs=2, metavar=("BASELINE", "CANDIDATE"),
@@ -224,10 +317,13 @@ def main() -> None:
     parser.add_argument("--run", action="store_true", help="Record two fresh Dream-1 runs (uses API credits)")
     parser.add_argument("--config", type=Path, help="Run the experiment exported from the Web workbench")
     parser.add_argument("--scene", action="append", choices=tuple(SCENES), help="Scene for --run. Repeat to compare both layouts.")
+    parser.add_argument("--prompt", help=f"Prompt for --run (default: {TASK!r}); it decides the judged task")
     parser.add_argument("--model")
     parser.add_argument("--seconds", type=float)
     parser.add_argument("--baseline-actions", type=int)
     parser.add_argument("--candidate-actions", type=int)
+    parser.add_argument("--home-seconds", type=float,
+                        help=f"Stop a trial once the arms are home for this long (default {DEFAULT_HOME_SECONDS:g}; 0: off)")
     parser.add_argument("--viewport-jpeg", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--viewer", action="store_true", help="Open the MuJoCo viewer during each new run")
     parser.add_argument("--yolo", action="store_true", help="Run offline YOLO on each fresh recording")
@@ -235,11 +331,12 @@ def main() -> None:
     args = parser.parse_args()
     if sum(bool(mode) for mode in (args.run, args.existing, args.config)) != 1:
         parser.error("Choose --run, --config CONFIG, or --existing BASELINE CANDIDATE.")
-    overrides = (args.scene, args.model, args.seconds, args.baseline_actions, args.candidate_actions)
+    overrides = (args.scene, args.prompt, args.model, args.seconds, args.baseline_actions,
+                 args.candidate_actions, args.home_seconds)
     config = None
     if args.config:
         if any(value is not None for value in overrides):
-            parser.error("Put scene, model, time and action limits in the JSON when using --config.")
+            parser.error("Put scene, prompt, model, time, action and home limits in the JSON when using --config.")
         try:
             config = load_config(args.config)
         except (OSError, ValueError) as error:
@@ -248,42 +345,29 @@ def main() -> None:
         baseline_actions = 48 if args.baseline_actions is None else args.baseline_actions
         candidate_actions = 24 if args.candidate_actions is None else args.candidate_actions
         seconds = 120 if args.seconds is None else args.seconds
-        if (not isfinite(seconds) or seconds <= 0 or not 1 <= baseline_actions <= 48
-                or not 1 <= candidate_actions <= 48 or baseline_actions == candidate_actions):
-            parser.error("Use a positive duration and two distinct action limits from 1 to 48.")
         scene_ids = args.scene or [DEFAULT_SCENE_ID]
-        if len(scene_ids) != len(set(scene_ids)):
-            parser.error("Choose distinct scenes.")
         scene_fields = {"scene_id": scene_ids[0]} if len(scene_ids) == 1 else {"scene_ids": scene_ids}
-        config = {
-            "schema_version": 1, **scene_fields, "task_id": TASK_ID, "scorer": SCORER_ID,
-            "success_condition": SUCCESS_CONDITION, "model": args.model or "beta", "seconds": seconds,
-            "comparison_variable": "action_limit",
-            "baseline": {"prompt": TASK, "action_limit": baseline_actions},
-            "candidate": {"prompt": TASK, "action_limit": candidate_actions},
-        }
+        prompt = TASK if args.prompt is None else args.prompt
+        # Apply the same limits as Web and --config experiments.
+        try:
+            config = validate_config({
+                "schema_version": 1, **scene_fields,
+                "model": "beta" if args.model is None else args.model, "seconds": seconds,
+                "auto_stop_home_seconds": DEFAULT_HOME_SECONDS if args.home_seconds is None else args.home_seconds,
+                "comparison_variable": "action_limit",
+                "baseline": {"prompt": prompt, "action_limit": baseline_actions},
+                "candidate": {"prompt": prompt, "action_limit": candidate_actions},
+            })
+        except ValueError as error:
+            parser.error(str(error))
 
     output = (args.output_dir / f"comparison-{uuid4().hex[:12]}").resolve()
+    if config is not None:
+        run_experiment(config, output, partial(run_trial, args))
+        return
     output.mkdir(parents=True)
-    if config is None:
-        report = pair_report(*map(assess, args.existing))
-        print_pair(report)
-    else:
-        (output / "experiment.json").write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
-        scene_ids = config.get("scene_ids") or [config["scene_id"]]
-        if len(scene_ids) == 1:
-            report = run_pair(args, output, {**config, "scene_id": scene_ids[0]})
-        else:
-            pairs = []
-            for scene_id in scene_ids:
-                print(f"\nScene: {scene_id}", flush=True)
-                scene_folder = output / scene_id
-                scene_folder.mkdir()
-                pair = run_pair(args, scene_folder, {**config, "scene_id": scene_id})
-                pairs.append({"scene_id": scene_id, **pair})
-            report = {**summarize(pairs), "scenes": pairs}
-            print(f"\n{report['decision']}: {report['reason']}")
-        report["experiment"] = config
+    report = pair_report(*map(assess, args.existing))
+    print_pair(report)
     path = output / "comparison.json"
     path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     print(f"Report: {path}")

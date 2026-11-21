@@ -15,62 +15,54 @@ h2{font-size:1.15rem;margin:0 0 .65rem}.muted{color:var(--muted)}
 section{background:var(--surface);border:1px solid var(--line);border-radius:.9rem;padding:1.15rem;align-self:start}
 fieldset{border:0;margin:0 0 1rem;padding:0}legend{font-weight:700;margin-bottom:.55rem;padding:0}
 label{display:block;margin-bottom:.7rem}input,select,textarea,button{font:inherit}
-input:not([type=radio]),select,textarea{display:block;width:100%;background:#0c131e;border:1px solid #40516b;color:var(--ink);border-radius:.45rem;padding:.48rem .64rem;margin-top:.25rem}
+input:not([type=checkbox]),select,textarea{display:block;width:100%;background:#0c131e;border:1px solid #40516b;color:var(--ink);border-radius:.45rem;padding:.48rem .64rem;margin-top:.25rem}
 input[readonly],textarea[readonly]{color:#adbdce;background:#1d293a}
 textarea{resize:vertical;min-height:4.7rem}select{appearance:none;background:#0c131e linear-gradient(45deg,transparent 50%,var(--muted) 50%) calc(100% - 16px) 50%/6px 6px no-repeat;padding-right:1.8rem}
-.row{display:grid;grid-template-columns:1fr 1fr;gap:.8rem}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:.8rem}.row3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:.8rem}
 button{border:0;background:var(--accent);color:#081d19;font-weight:700;padding:.55rem .85rem;border-radius:.45rem;cursor:pointer}
 button:disabled{opacity:.55;cursor:default}
 :focus-visible{outline:2px solid var(--accent);outline-offset:3px}
 pre{white-space:pre-wrap;overflow-wrap:anywhere;padding:.8rem;border-radius:.45rem;background:#0c131e;color:#d3e5f6;max-height:26rem;overflow:auto}
 .run-options{margin:1rem 0}.run-options input[type=checkbox]{display:inline;width:auto;margin:0 .4rem 0 0}
-.secondary{background:#26364a;color:var(--ink)}
-.viewport-panel{margin-bottom:1rem}
-.viewport-panel img{display:block;width:100%;aspect-ratio:4/3;object-fit:contain;border-radius:.55rem;background:#080e17}
+.secondary{background:#26364a;color:var(--ink)}.danger{background:#5a2733;color:#ffd7de}
+.controls{display:flex;flex-wrap:wrap;gap:.5rem;margin:.6rem 0}
+.viewport-panel{margin-top:1.5rem}
+.viewport-panel img{display:block;width:100%;max-width:52rem;aspect-ratio:4/3;object-fit:contain;border-radius:.55rem;background:#080e17}
 .viewport-panel img[hidden]{display:none}
 .status{color:var(--accent);margin:.4rem 0}.status[data-error=true]{color:#ffb2b2}
-@media(max-width:760px){.layout,.row{grid-template-columns:1fr}}
+.task{border-left:3px solid var(--accent);padding:.35rem .7rem;margin:0 0 1rem;background:#0f1824;border-radius:.35rem}
+.task[data-error=true]{border-color:#ffb2b2}
+.hint{font-size:.85rem;color:var(--muted);margin-top:.2rem}
+@media(max-width:760px){.layout,.row,.row3{grid-template-columns:1fr}}
 </style>
 <header><nav aria-label="Workbench"><strong>DreamBench</strong><a href="/">Results</a><a href="/configure" aria-current="page">Configure</a></nav></header>
 <main>
 <h1>Configure a regression</h1>
-<p class="muted">Choose a scene and a success condition, then compare one prompt or execution setting.</p>
-<section id="viewport-panel" class="viewport-panel" hidden aria-labelledby="viewport-title">
+<p class="muted">Write the Dream-1 prompts and compare one prompt or execution setting. The judged task is read from the prompt.</p>
+<section id="viewport-panel" class="viewport-panel" aria-labelledby="viewport-title">
 <h2 id="viewport-title">MuJoCo viewport</h2>
-<p id="viewport-status" class="muted">Waiting for the simulator…</p>
+<p id="sim-status" class="status" role="status">Checking the simulator…</p>
 <img id="viewport-image" alt="Live MuJoCo 3D view of both arms and the workbench" hidden>
 </section>
 <div class="layout">
 <section aria-label="Experiment configuration">
 <form id="experiment">
-<label>Scenario
-<select id="preset">
-<option value="apple">YAM tabletop · apple into bowl</option>
-<option value="apple-both">Both YAM layouts · apple into bowl</option>
-<option value="apple-offset">YAM offset layout · apple into bowl</option>
-<option value="orange">YAM tabletop · orange into bowl</option>
-<option value="banana">YAM tabletop · banana onto plate</option>
-<option value="custom">Custom scene and task</option>
-</select></label>
-<div id="custom" hidden>
-<label>Scene identifier<input id="scene" maxlength="80" placeholder="e.g. lab-sorting-table-v1"></label>
-<label>Task identifier<input id="task" maxlength="80" placeholder="e.g. sort-inventory"></label>
-</div>
-<label>Success condition<textarea id="goal" maxlength="500" required></textarea></label>
-<p class="muted" id="support"></p>
+<p id="task" class="task" role="status" aria-live="polite">Reading the task from the prompt…</p>
 <label>Compare
 <select id="variable"><option value="action_limit">Actions executed per response</option><option value="prompt">Dream-1 prompt</option></select></label>
-<div class="row">
+<div class="row3">
 <label>Model identifier<input id="model" value="beta" maxlength="100" required></label>
 <label>Time limit per run (s)<input id="seconds" type="number" min="1" max="600" value="120" required></label>
+<label>Stop after arms home (s)<input id="home" type="number" min="0" max="120" step="0.5" value="5" required>
+<span class="hint">0 turns the auto-stop off.</span></label>
 </div>
 <div class="row">
 <fieldset><legend>Baseline</legend>
-<label>Baseline prompt<textarea id="prompt-a" maxlength="500" required></textarea></label>
+<label>Baseline prompt<textarea id="prompt-a" maxlength="500" required>put apple into the bowl</textarea></label>
 <label>Baseline action limit<input id="actions-a" type="number" min="1" max="48" value="48" required></label>
 </fieldset>
 <fieldset><legend>Candidate</legend>
-<label>Candidate prompt<textarea id="prompt-b" maxlength="500" required></textarea></label>
+<label>Candidate prompt<textarea id="prompt-b" maxlength="500" required>put apple into the bowl</textarea></label>
 <label>Candidate action limit<input id="actions-b" type="number" min="1" max="48" value="24" required></label>
 </fieldset>
 </div>
@@ -85,13 +77,18 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;padding:.8rem;border-radius:.45r
 <legend>Run locally</legend>
 <p id="connection" class="status" role="status">Checking the local server…</p>
 <p id="connection-help" class="muted" hidden>From the DreamBench folder, run
-<code>python3 web_dashboard.py</code>, then open the configuration page using the URL printed in your terminal.
+<code>~/dream-env/bin/python web_dashboard.py</code>, then open the configuration page using the URL printed in your terminal.
 <a id="local-config" href="http://127.0.0.1:8765/configure" hidden>Open the local configuration page</a></p>
 <button id="reconnect" class="secondary" type="button" hidden>Check connection</button>
-<label><input id="viewer" type="checkbox">Also open the desktop MuJoCo window</label>
 <label><input id="yolo" type="checkbox">Generate YOLO replay overlays</label>
 <label><input id="credits" type="checkbox">I confirm this run may use Dream-1 API credits</label>
+<div class="controls" role="group" aria-label="Simulator controls">
 <button id="run" type="button" disabled>Run experiment</button>
+<button id="reset" type="button" class="secondary" disabled title="Restore the scene: objects and arms. Stops a running experiment.">Reset</button>
+<button id="reset-robot" type="button" class="secondary" disabled title="Drive the arms home over 2 s, leaving the objects. Stops a running experiment.">Reset robot</button>
+<button id="stop" type="button" class="danger" disabled title="Stop the running trial, save its recording and skip the remaining trials.">Stop</button>
+</div>
+<p class="hint">Reset restores objects and arms. Reset robot drives only the arms home. Both stop a running experiment, as in Dream YAM Sim. Each trial still starts from a reset scene.</p>
 </fieldset>
 <p id="run-status" class="status" role="status" aria-live="polite"></p>
 <pre id="run-log" hidden></pre>
@@ -100,64 +97,77 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;padding:.8rem;border-radius:.45r
 </div></main>
 <script>
 'use strict';
-const presets = {
-  apple: {
-    scene: 'yam-tabletop-default', task: 'apple-in-bowl', scorer: 'apple-in-bowl-v1',
-    prompt: 'put apple into the bowl', goal: 'The released apple stays supported by the bowl and stable for at least 0.5 seconds.',
-  },
-  'apple-both': {
-    scene: 'yam-tabletop-default', scenes: ['yam-tabletop-default', 'yam-tabletop-offset'],
-    task: 'apple-in-bowl', scorer: 'apple-in-bowl-v1',
-    prompt: 'put apple into the bowl', goal: 'The released apple stays supported by the bowl and stable for at least 0.5 seconds.',
-  },
-  'apple-offset': {
-    scene: 'yam-tabletop-offset', task: 'apple-in-bowl', scorer: 'apple-in-bowl-v1',
-    prompt: 'put apple into the bowl', goal: 'The released apple stays supported by the bowl and stable for at least 0.5 seconds.',
-  },
-  orange: {
-    scene: 'yam-tabletop-default', task: 'orange-in-bowl', scorer: null,
-    prompt: 'put orange into the bowl', goal: 'The released orange stays stable inside the bowl.',
-  },
-  banana: {
-    scene: 'yam-tabletop-default', task: 'banana-on-plate', scorer: null,
-    prompt: 'put banana on the plate', goal: 'The released banana stays stable on the plate.',
-  },
-};
-
 const get = id => document.getElementById(id);
 const form = get('experiment');
-const preset = get('preset');
 const variable = get('variable');
-const goal = get('goal');
 const promptA = get('prompt-a');
 const promptB = get('prompt-b');
 const actionsA = get('actions-a');
 const actionsB = get('actions-b');
 let snapshot = null;
-let activeJob = false;
-let viewportJob = null;
-let viewportUrl = null;
+let resolved = null;       // the server's reading of the current snapshot: {task, note} or {error}
+let resolveTimer = null;
+let resolveSeq = 0;
+let sim = {state: 'offline', message: '', job: null};
 let online = false;
+let viewportUrl = null;
+let viewportBusy = false;
+let reportedJob = null;
 const servedLocally = location.protocol === 'http:' &&
   ['127.0.0.1', 'localhost'].includes(location.hostname);
-let candidatePrompt = '';
-let candidateActions = '24';
+let candidatePrompt = promptB.value;
+let candidateActions = actionsB.value;
 
-function resetScenario() {
-  const profile = presets[preset.value];
-  get('custom').hidden = Boolean(profile);
-  get('scene').required = !profile;
-  get('task').required = !profile;
-  goal.readOnly = Boolean(profile?.scorer);
-  goal.value = profile?.goal ?? '';
-  promptA.value = profile?.prompt ?? '';
-  candidatePrompt = promptA.value;
-  promptB.value = candidatePrompt;
-  update();
+const jobRunning = () => sim.job?.status === 'running';
+
+function setButtons() {
+  const busy = ['starting', 'resetting', 'closing'].includes(sim.state);
+  get('run').disabled = !online || busy || jobRunning() || sim.state !== 'idle';
+  get('stop').disabled = !online || !jobRunning();
+  get('reset').disabled = !online || busy;
+  get('reset-robot').disabled = !online || busy;
+}
+
+function showTask() {
+  const box = get('task');
+  if (!snapshot) {
+    box.textContent = 'Complete the configuration to read the task.';
+    box.dataset.error = 'true';
+  } else if (!servedLocally || !online) {
+    box.textContent = 'Connect to the local server to read the task from the prompt.';
+    box.dataset.error = 'true';
+  } else if (!resolved) {
+    box.textContent = 'Reading the task from the prompt…';
+    box.dataset.error = 'false';
+  } else if (resolved.error) {
+    box.textContent = resolved.error;
+    box.dataset.error = 'true';
+  } else {
+    const task = resolved.task;
+    box.textContent = 'Judged as ' + task.task_id + ' · scorer ' + task.scorer + ' (' + task.tier + ')' +
+      (resolved.note ? ' · ' + resolved.note : '');
+    box.dataset.error = 'false';
+  }
+}
+
+async function resolveTask() {
+  const sequence = ++resolveSeq;
+  if (!snapshot || !servedLocally || !online) { showTask(); return; }
+  try {
+    const response = await fetch('/api/config/resolve', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({config: snapshot}),
+    });
+    const result = await readResponse(response);
+    if (sequence !== resolveSeq) return;
+    resolved = response.ok ? result : {error: result.error};
+  } catch (error) {
+    if (sequence !== resolveSeq) return;
+    resolved = {error: error instanceof TypeError ? 'Could not reach the local server.' : error.message};
+  }
+  showTask();
 }
 
 function update() {
-  const profile = presets[preset.value];
   const comparesPrompt = variable.value === 'prompt';
   promptB.readOnly = !comparesPrompt;
   actionsB.readOnly = comparesPrompt;
@@ -165,36 +175,37 @@ function update() {
   if (comparesPrompt) actionsB.value = actionsA.value;
   const a = {prompt: promptA.value.trim(), action_limit: actionsA.valueAsNumber};
   const b = {prompt: promptB.value.trim(), action_limit: actionsB.valueAsNumber};
-  const scene = profile?.scene ?? get('scene').value.trim();
-  const task = profile?.task ?? get('task').value.trim();
   const model = get('model').value.trim();
-  const successCondition = goal.value.trim();
+  const home = get('home').valueAsNumber;
   const same = a[variable.value] === b[variable.value];
-  get('support').textContent = profile?.scorer
-    ? 'Automatic scoring available. Run it here or download the configuration for the CLI.'
-    : 'Draft config. This task needs a scoring rule before automated regression.';
   let error = '';
-  if (!form.checkValidity() || !a.prompt || !b.prompt || !scene || !task || !model || /\s/.test(model) || !successCondition) {
+  if (!form.checkValidity() || !a.prompt || !b.prompt || !model || /\s/.test(model)) {
     error = 'Complete both configurations and use valid numeric limits.';
+  } else if (home !== 0 && home < 0.5) {
+    error = 'Use 0 (off) or at least 0.5 s for the auto-stop.';
   } else if (same) {
     error = comparesPrompt ? 'Enter two different prompts.' : 'Enter two different action limits.';
   }
-  snapshot = error ? null : {
-    schema_version: 1, ...(profile?.scenes ? {scene_ids: profile.scenes} : {scene_id: scene}), task_id: task,
-    success_condition: successCondition, scorer: profile?.scorer ?? null,
-    model, seconds: get('seconds').valueAsNumber, comparison_variable: variable.value,
+  const next = error ? null : {
+    schema_version: 1, model, seconds: get('seconds').valueAsNumber,
+    auto_stop_home_seconds: home, comparison_variable: variable.value,
     baseline: a, candidate: b,
   };
+  if (JSON.stringify(next) !== JSON.stringify(snapshot)) {
+    snapshot = next;
+    resolved = null;
+    clearTimeout(resolveTimer);
+    resolveTimer = setTimeout(resolveTask, 300);
+  }
   get('status').textContent = error || (comparesPrompt ? 'Prompt changed · action limit fixed' :
     'Action limit: ' + a.action_limit + ' → ' + b.action_limit + ' · prompt fixed');
-  if (snapshot && profile?.scenes) get('status').textContent += ' · ' + (profile.scenes.length * 2) + ' runs';
   get('status').dataset.error = String(Boolean(error));
   get('preview').textContent = snapshot ? JSON.stringify(snapshot, null, 2) : '';
   get('download').disabled = !snapshot;
-  get('run').disabled = activeJob;
+  showTask();
+  setButtons();
 }
 
-preset.addEventListener('change', resetScenario);
 variable.addEventListener('change', () => {
   if (variable.value === 'prompt') promptB.value = candidatePrompt;
   else actionsB.value = candidateActions;
@@ -215,28 +226,17 @@ get('download').addEventListener('click', () => {
   link.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 });
+
 function setConnection(connected, message) {
+  const changed = online !== connected;
   online = connected;
   get('connection').textContent = message;
   get('connection').dataset.error = String(!connected);
   get('connection-help').hidden = connected;
   get('reconnect').hidden = connected || !servedLocally;
   get('local-config').hidden = servedLocally;
+  if (changed && connected) resolveTask();
   update();
-}
-
-async function checkConnection() {
-  if (!servedLocally) {
-    setConnection(false, 'Open this page through the local DreamBench server to start an experiment.');
-    return;
-  }
-  try {
-    const response = await fetch('/api/health', {cache:'no-store'});
-    if (!response.ok || (await response.json()).service !== 'dreambench') throw new Error();
-    setConnection(true, 'Local server connected');
-  } catch {
-    setConnection(false, 'Could not connect to DreamBench at ' + location.origin + '.');
-  }
 }
 
 async function readResponse(response) {
@@ -246,84 +246,91 @@ async function readResponse(response) {
   return response.json();
 }
 
-function showViewport(id) {
-  viewportJob = id;
-  get('viewport-panel').hidden = false;
-  get('viewport-image').hidden = true;
-  get('viewport-status').textContent = 'Waiting for the simulator…';
-  async function refresh() {
-    if (viewportJob !== id) return;
+async function post(path, body) {
+  const response = await fetch(path, {
+    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body),
+  });
+  const result = await readResponse(response);
+  if (!response.ok) throw new Error(result.error);
+  return result;
+}
+
+function showJob(job) {
+  const runStatus = get('run-status');
+  if (!job) return;
+  runStatus.dataset.error = String(job.status === 'failed');
+  runStatus.textContent = job.message + ' · ' + job.trials_started + '/' + job.trials_total + ' trials started';
+  get('run-log').hidden = !job.log.length;
+  get('run-log').textContent = job.log.join('\n');
+  if (job.report_id) {
+    get('report').href = '/?run=' + encodeURIComponent(job.report_id);
+    get('report').textContent = job.status === 'stopped' ? 'Open report (stopped)' : 'Open report';
+    get('report').hidden = false;
+  } else if (job.status === 'running') {
+    get('report').hidden = true;
+  }
+}
+
+async function pollSim() {
+  if (!servedLocally) {
+    setConnection(false, 'Open this page through the local DreamBench server to start an experiment.');
+    get('sim-status').textContent = 'The simulator is only available through the local server.';
+    get('sim-status').dataset.error = 'true';
+    return;
+  }
+  try {
+    const response = await fetch('/api/sim', {cache: 'no-store'});
+    sim = await readResponse(response);
+    if (!online) setConnection(true, 'Local server connected');
+    get('sim-status').textContent = 'Simulator: ' + sim.message;
+    get('sim-status').dataset.error = String(sim.state === 'offline');
+    showJob(sim.job);
+    if (sim.job && sim.job.status !== 'running' && reportedJob !== sim.job.id) {
+      reportedJob = sim.job.id;
+      get('credits').checked = false;
+    }
+    setButtons();
+  } catch {
+    setConnection(false, 'Could not connect to DreamBench at ' + location.origin + '. Retrying…');
+    get('sim-status').textContent = 'Simulator status unavailable.';
+    get('sim-status').dataset.error = 'true';
+  }
+  setTimeout(pollSim, 1000);
+}
+
+async function refreshViewport() {
+  if (servedLocally && online && sim.state !== 'offline' && !viewportBusy) {
+    viewportBusy = true;
     try {
-      const response = await fetch('/api/jobs/' + encodeURIComponent(id) + '/viewport.jpg', {cache:'no-store'});
+      const response = await fetch('/api/sim/viewport.jpg', {cache: 'no-store'});
       if (response.ok && response.headers.get('Content-Type')?.startsWith('image/jpeg')) {
-        const blob = await response.blob();
-        if (viewportJob !== id) return;
         const previousUrl = viewportUrl;
-        viewportUrl = URL.createObjectURL(blob);
+        viewportUrl = URL.createObjectURL(await response.blob());
         get('viewport-image').src = viewportUrl;
         get('viewport-image').hidden = false;
         if (previousUrl) URL.revokeObjectURL(previousUrl);
-        get('viewport-status').textContent = 'Live 3D view';
-      } else if (response.status === 404) {
-        get('viewport-status').textContent = 'Viewport unavailable. Check the experiment status below.';
       }
     } catch {
-      if (viewportJob === id) get('viewport-status').textContent = 'Reconnecting to the viewport…';
+      // The status poll reports connection problems.
+    } finally {
+      viewportBusy = false;
     }
-    if (viewportJob === id) setTimeout(refresh, 200);
   }
-  refresh();
+  setTimeout(refreshViewport, 250);
 }
 
-async function poll(id) {
-  try {
-    const response = await fetch('/api/jobs/' + encodeURIComponent(id));
-    const job = await readResponse(response);
-    if (!response.ok) throw new Error(job.error);
-    get('run-status').dataset.error = String(job.status === 'failed');
-    get('run-status').textContent = job.message + ' · ' + job.trials_started + '/' + job.trials_total + ' trials started';
-    get('run-log').hidden = !job.log.length;
-    get('run-log').textContent = job.log.join('\n');
-    if (!online) setConnection(true, 'Local server connected');
-    if (job.status === 'running') {
-      setTimeout(() => poll(id), 1500);
-      return;
-    }
-    if (job.status === 'complete') {
-      get('report').href = '/?run=' + encodeURIComponent(job.report_id);
-      get('report').hidden = false;
-    }
-  } catch (error) {
-    if (error instanceof TypeError) {
-      setConnection(false, 'Connection lost while checking the experiment. Reconnecting…');
-      setTimeout(() => poll(id), 3000);
-      return;
-    }
-    get('run-status').textContent = error.message;
-  }
-  if (!online) checkConnection();
-  if (viewportJob === id) {
-    viewportJob = null;
-    const image = get('viewport-image');
-    get('viewport-status').textContent = image.hidden ? 'No viewport frames were received.' : 'Last recorded viewport';
-  }
-  sessionStorage.removeItem('dreambench-job');
-  activeJob = false;
-  update();
-}
-
+get('reconnect').addEventListener('click', pollSim);
 get('credits').addEventListener('change', update);
-get('reconnect').addEventListener('click', checkConnection);
+
 get('run').addEventListener('click', async () => {
-  if (activeJob) return;
   const runStatus = get('run-status');
   runStatus.dataset.error = 'true';
   if (!snapshot) {
     runStatus.textContent = 'Fix the configuration before starting an experiment.';
     return;
   }
-  if (!snapshot.scorer) {
-    runStatus.textContent = 'Select a task with an automatic scoring rule to run an experiment.';
+  if (!resolved || resolved.error) {
+    runStatus.textContent = resolved?.error || 'Wait until the task has been read from the prompt.';
     return;
   }
   if (!get('credits').checked) {
@@ -331,48 +338,44 @@ get('run').addEventListener('click', async () => {
     get('credits').focus();
     return;
   }
-  if (!online) await checkConnection();
-  if (activeJob) return;
-  if (!online) {
-    runStatus.textContent = 'Could not submit. Check the local DreamBench server and try again.';
-    return;
-  }
-  runStatus.dataset.error = 'false';
-  const request = {config:snapshot, confirm_api_credits:true, viewer:get('viewer').checked, yolo:get('yolo').checked};
-  activeJob = true;
-  update();
+  get('run').disabled = true;
   get('report').hidden = true;
-  get('run-log').hidden = true;
-  get('run-status').textContent = 'Submitting experiment…';
+  runStatus.dataset.error = 'false';
+  runStatus.textContent = 'Submitting experiment…';
   try {
-    const response = await fetch('/api/jobs', {
-      method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(request),
-    });
-    const result = await readResponse(response);
-    if (!response.ok) throw new Error(result.error);
+    await post('/api/jobs', {config: snapshot, confirm_api_credits: true, yolo: get('yolo').checked});
     get('credits').checked = false;
-    sessionStorage.setItem('dreambench-job', result.id);
-    showViewport(result.id);
-    poll(result.id);
+    sim.job = {status: 'running'};
+    setButtons();
   } catch (error) {
-    activeJob = false;
-    get('run-status').dataset.error = 'true';
-    if (error instanceof TypeError) {
-      setConnection(false, 'Connection lost while submitting. Check the local server before retrying.');
-      get('run-status').textContent = 'Submission was not confirmed. No automatic retry was sent.';
-    } else {
-      get('run-status').textContent = error.message;
-    }
-    update();
+    runStatus.dataset.error = 'true';
+    runStatus.textContent = error instanceof TypeError
+      ? 'Submission was not confirmed. No automatic retry was sent.' : error.message;
+    setButtons();
   }
 });
-resetScenario();
-checkConnection();
-const previousJob = servedLocally && sessionStorage.getItem('dreambench-job');
-if (previousJob) {
-  activeJob = true;
-  update();
-  showViewport(previousJob);
-  poll(previousJob);
+
+async function simCommand(path, label, confirmText) {
+  if (jobRunning() && confirmText && !confirm(confirmText)) return;
+  const runStatus = get('run-status');
+  try {
+    await post(path, {});
+    runStatus.dataset.error = 'false';
+    runStatus.textContent = label;
+  } catch (error) {
+    runStatus.dataset.error = 'true';
+    runStatus.textContent = error instanceof TypeError ? 'Could not reach the local server.' : error.message;
+  }
 }
+
+get('stop').addEventListener('click', () => simCommand('/api/sim/stop',
+  'Stop sent. The current step finishes and its recording is saved.'));
+get('reset').addEventListener('click', () => simCommand('/api/sim/reset', 'Scene reset requested.',
+  'Reset stops the running experiment. Continue?'));
+get('reset-robot').addEventListener('click', () => simCommand('/api/sim/reset_robot', 'Reset robot requested.',
+  'Reset robot stops the running experiment. Continue?'));
+
+update();
+pollSim();
+refreshViewport();
 </script></html>

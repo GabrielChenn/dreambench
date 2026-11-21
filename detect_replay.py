@@ -73,7 +73,7 @@ def receive(connection: Connection) -> dict:
 
 def annotate(folder: Path, every: int, connection: Connection, detector: dict) -> None:
     import av
-    from record_replay import CAMERAS, write_replay
+    from dreamlabs.replay_page import CAMERAS, write_replay
 
     metadata = json.loads((folder / "run.json").read_text(encoding="utf-8"))
     if metadata.get("video_camera_order") != list(CAMERAS) or metadata.get("video_layout") != "horizontal":

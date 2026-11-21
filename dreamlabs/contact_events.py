@@ -4,8 +4,13 @@
 from __future__ import annotations
 from math import isclose
 
-FRUITS = {"apple", "orange", "banana"}
+FRUITS = {"apple", "orange", "banana", "water_bottle"}  # the scene's movable objects
+SUPPORTS = {"bowl", "plate"}
 EVENTS = ("grasp_contact", "arm_table", "arm_arm")
+# Every category contact_category can return, in display order. The first four are collisions.
+CATEGORIES = ("arm_table", "arm_arm", "arm_self", "arm_object", "grasp_contact", "apple_bowl", "object_support")
+COLLISIONS = ("arm_table", "arm_arm", "arm_self", "arm_object")
+TIPS = ("left_tip_", "right_tip_")
 
 
 def arm(body: str) -> str | None:
@@ -14,16 +19,21 @@ def arm(body: str) -> str | None:
 
 
 def contact_category(geom_a: str, body_a: str, geom_b: str, body_b: str) -> str | None:
+    """Classify one MuJoCo contact by the bodies it joins. Object-on-table rest contacts return None."""
     side_a, side_b = arm(body_a), arm(body_b)
-    if side_a and side_b and side_a != side_b:
-        return "arm_arm"
+    if side_a and side_b:
+        return "arm_arm" if side_a != side_b else "arm_self"
     if (geom_a == "table" and side_b) or (geom_b == "table" and side_a):
         return "arm_table"
-    if ((body_a in FRUITS and body_b.startswith(("left_tip_", "right_tip_")))
-            or (body_b in FRUITS and body_a.startswith(("left_tip_", "right_tip_")))):
+    if ((body_a in FRUITS and body_b.startswith(TIPS))
+            or (body_b in FRUITS and body_a.startswith(TIPS))):
         return "grasp_contact"
     if {body_a, body_b} == {"apple", "bowl"}:
         return "apple_bowl"
+    if (side_a or side_b) and "world" not in (body_a, body_b):
+        return "arm_object"  # an arm link (not a fingertip on an object) hitting an object or container
+    if (body_a in FRUITS and body_b in SUPPORTS) or (body_b in FRUITS and body_a in SUPPORTS):
+        return "object_support"
     return None
 
 

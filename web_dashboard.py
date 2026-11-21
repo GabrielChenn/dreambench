@@ -11,13 +11,21 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from compare_replays import validate_config
-from dreamlabs.web_jobs import ExperimentJobs, JobConflict
+from dreamlabs.replay_page import replay_html
+from dreamlabs.review_client import ReviewRenderer, ReviewUnavailable
+from dreamlabs.scoring import verdict as judge_verdict
+from dreamlabs.task_parser import GENERIC_NOTE
+from dreamlabs.web_jobs import JobConflict, SimWorkspace
 from dreamlabs.web_theme import WORKBENCH_CSS
 
 ROOT = Path(__file__).resolve().parent / "outputs"
 ARTIFACTS = {"replay.html", "replay-yolo.html", "replay-detections.html", "video.mp4"}
-OUTCOMES = {"success": "Passed", "task-failure": "Failed", "invalid-run": "Invalid run",
-            "run-error": "Run error", "unsupported-task": "Unsupported task", "insufficient-evidence": "Insufficient evidence"}
+# Verdicts from dreambench_bk/judge_run.py; the outcome explains how the scorer got there.
+OUTCOMES = {"success": "Placed", "task-failure": "Task failure", "invalid-run": "Invalid run",
+            "run-error": "Run error", "unsupported-task": "Unsupported task",
+            "insufficient-evidence": "Insufficient evidence", "not-run": "Not run"}
+STOP_REASONS = {"finished": "Time limit", "home": "Arms back home", "operator": "Stopped from the page",
+                "error": "Error", "interrupted": "Interrupted"}
 DECISIONS = {"keep-baseline": "Keep baseline", "retest-candidate": "Retest candidate",
              "insufficient-evidence": "Insufficient evidence"}
 
@@ -33,7 +41,9 @@ aside small{display:block;color:var(--muted);font-size:.85rem}
 .scene{margin-top:1.55rem}.scene h3{margin:.2rem 0 .7rem}.cards{display:grid;grid-template-columns:1fr 1fr;gap:1rem}
 .head{display:flex;gap:.6rem;align-items:center;justify-content:space-between;flex-wrap:wrap}
 .head h2{margin:0}strong.pill{font-size:.88rem;background:#293449;border-radius:2rem;padding:.22rem .65rem}
-strong.success{background:#16463a;color:#adf6dc}strong.task-failure{background:#4a2933;color:#ffc5d0}
+strong.successed{background:#16463a;color:#adf6dc}strong.failed{background:#4a2933;color:#ffc5d0}
+strong.timeout-stopped{background:#4a3d1c;color:#ffe1a3}
+.what{margin-top:.8rem;padding:.6rem .75rem;border-radius:.5rem;background:#0f1824;color:#d3e5f6}
 dl{margin:1rem 0;display:grid;gap:.5rem}dl div{display:flex;justify-content:space-between;gap:.75rem;border-bottom:1px solid var(--line);padding-bottom:.45rem}
 dt{color:var(--muted)}dd{margin:0;font-variant-numeric:tabular-nums;text-align:right}
 .motion h3{margin:1rem 0 .5rem;font-size:1rem}.motion dl{margin:.5rem 0}
@@ -95,10 +105,31 @@ def value(item: object, suffix: str = "") -> str:
     return escape(f"{item:.2f}" if isinstance(item, float) else str(item)) + suffix
 
 
+def mapping(item: object) -> dict:
+    """Treat a missing or malformed report section as empty."""
+    return item if isinstance(item, dict) else {}
+
+
+def is_number(item: object) -> bool:
+    return type(item) in (int, float)
+
+
+def trial_verdict(trial: dict) -> str | None:
+    """The trial's verdict; older reports without one are judged from their outcome."""
+    if trial.get("outcome") == "not-run":
+        return None
+    stored = trial.get("verdict")
+    return stored if isinstance(stored, str) else judge_verdict(trial.get("outcome"), trial.get("stop_reason"))
+
+
 def trial_card(root: Path, path: Path, label: str, trial: dict) -> str:
     outcome = str(trial.get("outcome", "Unknown"))
+    verdict = trial_verdict(trial)
     url = replay_url(root, path, trial.get("replay"), trial.get("actions"), label)
+    stop = trial.get("stop_reason")
     metrics = (
+        ("Scorer result", escape(OUTCOMES.get(outcome, outcome))),
+        ("Run ended by", escape(STOP_REASONS.get(stop, stop)) if isinstance(stop, str) else "—"),
         ("Action limit", value(trial.get("actions"), " steps")),
         ("API requests", value(trial.get("reported_api_requests"))),
         ("Wall time", value(trial.get("wall_elapsed_s"), " s")),
@@ -117,19 +148,20 @@ def trial_card(root: Path, path: Path, label: str, trial: dict) -> str:
             f'<div class="motion"><h3>Motion quality</h3><dl>{quality_rows}</dl>'
             '<p class="detail">Whole recording, including warm-up. Lower means less tracking error or jerk.</p></div>'
         )
-    contacts = trial.get("contact_summary") or {}
+    contacts = mapping(trial.get("contact_summary"))
     contact_rows = ""
     if contacts.get("sampled_frames"):
+        events = mapping(contacts.get("events"))
         for category, name in (("grasp_contact", "Finger–fruit contacts"),
                                ("arm_table", "Arm–table collisions"), ("arm_arm", "Arm–arm collisions")):
-            item = contacts["events"][category]
-            evidence = item["first_sim_s"]
+            item = mapping(events.get(category))
+            evidence = item.get("first_sim_s")
             timestamp = (f' · <a href="{escape(url)}?t={value(evidence)}">{value(evidence, " s sim")}</a>'
-                         if url and evidence is not None else "")
-            contact_rows += f'<div><dt>{name}</dt><dd>{value(item["events"])}{timestamp}</dd></div>'
-        peak = contacts.get("released_apple_bowl_peak")
-        peak_value = value(peak["normal_force_n"], " N") if peak else "—"
-        if peak and url:
+                         if url and is_number(evidence) else "")
+            contact_rows += f'<div><dt>{name}</dt><dd>{value(item.get("events"))}{timestamp}</dd></div>'
+        peak = mapping(contacts.get("released_apple_bowl_peak"))
+        peak_value = value(peak["normal_force_n"], " N") if "normal_force_n" in peak else "—"
+        if url and is_number(peak.get("sim_s")):
             peak_value += f' · <a href="{escape(url)}?t={value(peak["sim_s"])}">{value(peak["sim_s"], " s sim")}</a>'
         contact_rows += f'<div><dt>Peak released apple–bowl normal force</dt><dd>{peak_value}</dd></div>'
     contact_panel = '<div class="motion"><h3>Contact events</h3>'
@@ -137,11 +169,17 @@ def trial_card(root: Path, path: Path, label: str, trial: dict) -> str:
                       if contact_rows else '<p class="detail">Contact telemetry unavailable for this recording.</p>')
     contact_panel += '</div>'
     link = f'<a class="link" href="{escape(url)}">Open {label.lower()} replay</a>' if url else ""
+    diagnostics = mapping(trial.get("diagnostics"))
+    what = (f'<p class="what">What happened: {value(diagnostics.get("summary"))}</p>'
+            if diagnostics.get("summary") else "")
+    note = f'<p class="detail">{escape(GENERIC_NOTE)}</p>' if trial.get("tier") == "generic" else ""
+    pill = verdict or "not run"
     return (
         f'<article><div class="head"><h2>{label}</h2>'
-        f'<strong class="pill {escape(outcome)}">{escape(OUTCOMES.get(outcome, outcome))}</strong></div>'
+        f'<strong class="pill {escape(pill.replace(" ", "-"))}">{escape(pill)}</strong></div>'
         f'<p class="detail">{value(trial.get("prompt", trial.get("task")))}</p>'
-        f'<dl>{rows}</dl><p class="detail">{value(trial.get("reason"))}</p>{quality}{contact_panel}{link}</article>'
+        f'<dl>{rows}</dl><p class="detail">{value(trial.get("reason"))}</p>{what}{note}'
+        f'{quality}{contact_panel}{link}</article>'
     )
 
 
@@ -159,7 +197,7 @@ def dashboard(root: Path, selected: str | None) -> str:
         label = f'{value(first_pair["baseline"].get("actions"))} vs {value(first_pair["candidate"].get("actions"))} steps'
         if "scenes" in report:
             label += f' · {len(report["scenes"])} scenes'
-        if (report.get("experiment") or {}).get("comparison_variable") == "prompt":
+        if mapping(report.get("experiment")).get("comparison_variable") == "prompt":
             label = "Prompt comparison"
         links.append(f'<li><a href="/?run={quote(name)}"{active}>{label}<small>{escape(name)}</small></a></li>')
     sidebar = "".join(links) or "<li>No local comparisons</li>"
@@ -168,13 +206,14 @@ def dashboard(root: Path, selected: str | None) -> str:
         pairs = report.get("scenes", [report])
         baseline = pairs[0]["baseline"]
         decision = str(report.get("decision", "Unknown"))
-        experiment = report.get("experiment") or {}
+        experiment = mapping(report.get("experiment"))
         task = value(experiment.get("task_id") or baseline.get("task_id") or baseline.get("task"))
         detail = f'{task} · model {value(experiment.get("model", baseline.get("model")))} · {value(experiment.get("seconds", baseline.get("seconds")), " s")} limit'
         if "scenes" in report:
-            passes = report["passes"]
-            detail += (f' · {value(report["valid_pairs"])}/{value(report["planned_pairs"])} matched pairs'
-                       f' · Baseline {value(passes["baseline"])} passes · Candidate {value(passes["candidate"])} passes')
+            passes = mapping(report.get("passes"))
+            detail += (f' · {value(report.get("valid_pairs"))}/{value(report.get("planned_pairs"))} matched pairs'
+                       f' · Baseline {value(passes.get("baseline"))} passes'
+                       f' · Candidate {value(passes.get("candidate"))} passes')
         content = (
             f'<div class="decision"><h2>{escape(DECISIONS.get(decision, decision))}</h2>'
             f'<p class="detail">{value(report.get("reason"))}</p><p class="detail">{detail}</p></div>'
@@ -207,7 +246,56 @@ def dashboard(root: Path, selected: str | None) -> str:
 <section aria-label="Comparison">{content}</section></div></main></html>"""
 
 
-def make_handler(root: Path, jobs: ExperimentJobs) -> type[BaseHTTPRequestHandler]:
+SIM_COMMANDS = {"/api/sim/stop": "stop", "/api/sim/reset": "reset", "/api/sim/reset_robot": "reset_robot"}
+TASK_FIELDS = ("task_id", "object", "target", "scorer", "tier", "success_condition")
+
+
+def recording_dir(root: Path, relative: str | None) -> Path | None:
+    """A replay-* folder under the outputs root that holds a trajectory, or None."""
+    if not isinstance(relative, str) or not relative or "\x00" in relative:
+        return None
+    path = (root / relative).resolve()
+    if path.is_relative_to(root) and path.name.startswith("replay-") and (path / "trajectory.jsonl").is_file():
+        return path
+    return None
+
+
+def review_camera(query: dict) -> dict:
+    """Read the 3D camera from the query string; the worker clamps it again."""
+    def number(key: str) -> float | None:
+        try:
+            value = float(query.get(key, [""])[0])
+        except ValueError:
+            return None
+        return value if value == value and abs(value) < 1e6 else None
+
+    camera = {key: number(name) for key, name in (("azimuth", "az"), ("elevation", "el"), ("distance", "dist"))}
+    lookat = [number(name) for name in ("lx", "ly", "lz")]
+    camera = {key: value for key, value in camera.items() if value is not None}
+    if all(value is not None for value in lookat):
+        camera["lookat"] = lookat
+    return camera
+
+
+def live_replay(path: Path) -> bytes | None:
+    """Rebuild replay.html from the recording, so older recordings get the current replay page."""
+    track = path.parent / "trajectory.jsonl"
+    if path.name not in ("replay.html", "replay-yolo.html") or not track.is_file():
+        return None
+    try:
+        rows = [json.loads(line) for line in track.read_text(encoding="utf-8").splitlines() if line.strip()]
+        detections = None
+        if path.name == "replay-yolo.html":
+            found = path.parent / "detections-yolo.jsonl"
+            if not found.is_file():
+                return None
+            detections = [json.loads(line) for line in found.read_text(encoding="utf-8").splitlines() if line.strip()]
+        return replay_html(rows, detections=detections).encode("utf-8")
+    except (OSError, ValueError):
+        return None  # fall back to the saved page
+
+
+def make_handler(root: Path, sim: SimWorkspace, review: ReviewRenderer | None = None) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
         def json_response(self, status: int, data: dict) -> None:
             payload = json.dumps(data).encode("utf-8")
@@ -218,56 +306,81 @@ def make_handler(root: Path, jobs: ExperimentJobs) -> type[BaseHTTPRequestHandle
             self.end_headers()
             self.wfile.write(payload)
 
+        def local_host(self) -> str | None:
+            # Reject other Host names so a DNS-rebinding page cannot read local reports.
+            port = self.server.server_port
+            host = self.headers.get("Host")
+            return host if host in {f"127.0.0.1:{port}", f"localhost:{port}"} else None
+
+        def read_json(self) -> object:
+            size = int(self.headers.get("Content-Length", "0"))
+            if self.headers.get_content_type() != "application/json" or not 1 <= size <= 32768:
+                raise ValueError("Expected a JSON request up to 32 KB.")
+            return json.loads(self.rfile.read(size))
+
         def do_POST(self) -> None:
-            if self.path != "/api/jobs":
+            if self.path not in ("/api/jobs", "/api/config/resolve", *SIM_COMMANDS):
                 self.send_error(404)
                 return
-            port = self.server.server_port
-            hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
-            host = self.headers.get("Host")
-            if host not in hosts or self.headers.get("Origin") != f"http://{host}":
-                self.json_response(403, {"error": "Start experiments from the local workbench."})
+            host = self.local_host()
+            if host is None or self.headers.get("Origin") != f"http://{host}":
+                self.json_response(403, {"error": "Use the controls on the local workbench page."})
                 return
             try:
-                size = int(self.headers.get("Content-Length", "0"))
-                if self.headers.get_content_type() != "application/json" or not 1 <= size <= 32768:
-                    raise ValueError("Expected an experiment JSON request up to 32 KB.")
-                payload = json.loads(self.rfile.read(size))
-                if (not isinstance(payload, dict) or payload.get("confirm_api_credits") is not True
-                        or any(type(payload.get(flag)) is not bool for flag in ("viewer", "yolo"))):
+                payload = self.read_json()
+                if not isinstance(payload, dict):
+                    raise ValueError("Send a JSON object.")
+                if self.path == "/api/config/resolve":
+                    config = validate_config(payload.get("config"))
+                    self.json_response(200, {"task": {key: config[key] for key in TASK_FIELDS},
+                                             "note": GENERIC_NOTE if config["tier"] == "generic" else None})
+                    return
+                if self.path in SIM_COMMANDS:
+                    sim.command(SIM_COMMANDS[self.path])
+                    self.json_response(202, {"sent": SIM_COMMANDS[self.path]})
+                    return
+                if payload.get("confirm_api_credits") is not True or type(payload.get("yolo")) is not bool:
                     raise ValueError("Confirm API usage and provide the run options.")
                 config = validate_config(payload.get("config"))
-                job_id = jobs.start(config, viewer=payload["viewer"], yolo=payload["yolo"])
+                job_id = sim.start(config, yolo=payload["yolo"])
             except ValueError as error:
                 self.json_response(400, {"error": str(error)})
                 return
             except JobConflict as error:
                 self.json_response(409, {"error": str(error)})
                 return
+            except Exception as error:  # answer in JSON rather than dropping the connection
+                self.json_response(500, {"error": f"{type(error).__name__}: {error}"})
+                return
             self.json_response(202, {"id": job_id})
 
         def do_GET(self) -> None:
+            if self.local_host() is None:
+                self.send_error(403, "Open the workbench at 127.0.0.1 or localhost.")
+                return
             request = urlsplit(self.path)
             if request.path == "/api/health":
                 self.json_response(200, {"service": "dreambench"})
                 return
+            if request.path == "/api/sim":
+                self.json_response(200, sim.status())
+                return
+            if request.path == "/api/sim/viewport.jpg":
+                frame = sim.viewport_frame()
+                self.send_response(200 if frame else 204)
+                self.send_header("Cache-Control", "no-store")
+                if frame:
+                    self.send_header("Content-Type", "image/jpeg")
+                    self.send_header("Content-Length", str(len(frame)))
+                self.end_headers()
+                if frame:
+                    self.wfile.write(frame)
+                return
+            if request.path in ("/api/review/summary", "/api/review/frame.jpg"):
+                self.review(request.path, parse_qs(request.query))
+                return
             if request.path.startswith("/api/jobs/"):
-                job_id, separator, asset = request.path.removeprefix("/api/jobs/").partition("/")
-                if separator:
-                    if asset != "viewport.jpg" or jobs.snapshot(job_id) is None:
-                        self.send_error(404)
-                        return
-                    frame = jobs.viewport_frame(job_id)
-                    self.send_response(200 if frame else 204)
-                    self.send_header("Cache-Control", "no-store")
-                    if frame:
-                        self.send_header("Content-Type", "image/jpeg")
-                        self.send_header("Content-Length", str(len(frame)))
-                    self.end_headers()
-                    if frame:
-                        self.wfile.write(frame)
-                    return
-                status = jobs.snapshot(job_id)
+                status = sim.snapshot(request.path.removeprefix("/api/jobs/"))
                 if status is None:
                     self.json_response(404, {"error": "Run status is no longer available."})
                 else:
@@ -294,7 +407,45 @@ def make_handler(root: Path, jobs: ExperimentJobs) -> type[BaseHTTPRequestHandle
                 return
             self.serve_artifact(path)
 
+        def review(self, endpoint: str, query: dict) -> None:
+            folder = recording_dir(root, query.get("recording", [None])[0])
+            if folder is None:
+                self.json_response(404, {"error": "Recording not found under the workbench outputs."})
+                return
+            if review is None:
+                self.json_response(503, {"error": "The 3D review is not enabled on this server."})
+                return
+            try:
+                if endpoint == "/api/review/summary":
+                    self.json_response(200, review.summary(folder))
+                    return
+                frame = int(query.get("frame", ["0"])[0])
+                flags = {key: query.get(key, ["1" if key != "other" else "0"])[0] == "1"
+                         for key in ("contacts", "other", "trails")}
+                image = review.render(folder, frame, review_camera(query), **flags)
+            except ReviewUnavailable as error:
+                self.json_response(503, {"error": str(error)})
+                return
+            except ValueError as error:
+                self.json_response(422, {"error": str(error)})
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(image)))
+            self.end_headers()
+            self.wfile.write(image)
+
         def serve_artifact(self, path: Path) -> None:
+            page = live_replay(path)
+            if page is not None:
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(page)))
+                self.end_headers()
+                self.wfile.write(page)
+                return
             size = path.stat().st_size
             start, stop = 0, size - 1
             byte_range = self.headers.get("Range")
@@ -343,17 +494,28 @@ def main() -> None:
     dream_python = Path.home() / "dream-env" / "bin" / "python"
     parser.add_argument("--runner-python", type=Path,
                         default=dream_python if dream_python.is_file() else Path(sys.executable))
+    parser.add_argument("--sim-viewer", action="store_true", help="Also open the desktop MuJoCo window")
+    parser.add_argument("--no-sim", action="store_true",
+                        help="Start the simulator only when the page asks for it, not at startup")
     args = parser.parse_args()
-    jobs = ExperimentJobs(args.outputs.resolve(), args.runner_python.absolute(),
-                          Path(__file__).with_name("compare_replays.py").resolve())
-    with ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(jobs.output_dir, jobs)) as server:
-        print(f"DreamBench · http://127.0.0.1:{server.server_port}", flush=True)
-        try:
-            server.serve_forever()
-        except KeyboardInterrupt:
-            pass
-        finally:
-            jobs.close()
+    review = ReviewRenderer(args.runner_python.absolute(), Path(__file__).with_name("review_worker.py").resolve())
+    sim = SimWorkspace(args.outputs.resolve(), args.runner_python.absolute(),
+                       Path(__file__).with_name("sim_workspace.py").resolve(), viewer=args.sim_viewer)
+    try:
+        with ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(sim.output_dir, sim, review)) as server:
+            print(f"DreamBench · http://127.0.0.1:{server.server_port}", flush=True)
+            if not args.no_sim:
+                try:
+                    sim.ensure_started()
+                except ValueError as error:
+                    print(f"Simulator not started: {error}", flush=True)
+            try:
+                server.serve_forever()
+            except KeyboardInterrupt:
+                pass
+    finally:
+        sim.close()
+        review.close()
 
 
 if __name__ == "__main__":
