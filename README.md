@@ -1,6 +1,6 @@
 # DreamBench
 
-A two-person HackLab Berlin project for regression testing Dream-1 tasks in simulation.
+Shared workspace for the HackLab Berlin Dream Labs track. The team is still deciding on the project topic.
 
 ## Reproduce the simulator baseline
 
@@ -12,4 +12,4 @@ In your existing Dream Labs Python environment, run `dreamcli example yam-mujoco
 python3 -m unittest discover -s tests -v
 ```
 
-The local scaffold uses mocks. It provides a starting point for integrating the simulator and building repeatable A/B tests.
+The local scaffold uses mocks. It provides a starting point for the team once the topic is agreed.
