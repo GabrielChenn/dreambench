@@ -18,8 +18,16 @@ REPLAY_CSS = """
 header nav{display:flex;align-items:center;gap:1.2rem;flex-wrap:wrap}
 header a{font-weight:650}
 .video-wrap{position:relative;background:#080e17;border-radius:.55rem;overflow:hidden}
+.video-stage{position:relative;margin:0 auto;overflow:hidden;width:min(100%,calc(70vh * var(--aspect,5.333)))}
+.video-strip{position:relative;width:calc(100% * var(--zoom,1));margin-left:calc(-100% * var(--offset,0))}
+.views{display:flex;flex-wrap:wrap;gap:.4rem;margin-bottom:.7rem}
+.views button{background:#26364a;color:var(--ink);font-weight:650;font-size:.875rem;padding:.3rem .8rem}
+.views button[aria-pressed=true]{background:var(--accent);color:#081d19}
 video{display:block;width:100%;height:auto}
 #boxes{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+#fullscreen{position:absolute;top:.5rem;right:.5rem;z-index:2;padding:.25rem .55rem;font-size:.85rem;opacity:.85}
+.video-wrap:fullscreen{display:flex;align-items:center;justify-content:center;border-radius:0;background:#000}
+.video-wrap:fullscreen .video-stage{width:min(100vw,calc(100vh * var(--aspect,5.333)));max-width:none}
 .cameras{display:flex;margin-bottom:.6rem;gap:.4rem}
 .cameras span{flex:1;text-align:center;color:var(--muted);font-size:.875rem}
 .controls{display:flex;align-items:end;flex-wrap:wrap;gap:.55rem;margin-top:.8rem}
@@ -98,8 +106,12 @@ Trajectories are solid up to this frame and faint after it.</p>
 </section>
 <section class="panel" aria-labelledby="video-title">
 <h2 id="video-title">Camera views</h2>
-<div class="cameras">__CAMERA_LABELS__</div>
-<div class="video-wrap"><video id="video" src="video.mp4" controls preload="metadata" muted playsinline></video><canvas id="boxes" hidden></canvas></div>
+<div class="views" id="views" role="group" aria-label="Camera view">__VIEW_BUTTONS__</div>
+<div class="cameras" id="camera-labels">__CAMERA_LABELS__</div>
+<div class="video-wrap" id="video-wrap"><div class="video-stage"><div class="video-strip">
+<video id="video" src="video.mp4" controls controlslist="nofullscreen" disablepictureinpicture preload="metadata" muted playsinline></video>
+<canvas id="boxes" hidden></canvas></div></div>
+<button id="fullscreen" class="secondary" type="button" title="Full screen with YOLO boxes (F)">⛶ Full screen</button></div>
 <p class="description" id="detection-note">__DETECTION_NOTE__</p>
 </section>
 <section class="panel" aria-labelledby="frame-title">
@@ -470,8 +482,11 @@ function draw(record) {
   context.clearRect(0, 0, canvas.width, canvas.height);
   if (!record?.ran) return;
   const width = record.camera_size_px[0];
-  context.font = 'bold 18px system-ui';
-  context.lineWidth = 3;
+  // Keep boxes and labels the same size on screen in every view and in full screen.
+  const scale = canvas.width / (canvas.clientWidth || canvas.width);
+  const font = 13 * scale, pad = 4 * scale;
+  context.font = 'bold ' + font + 'px system-ui';
+  context.lineWidth = 2 * scale;
   for (const [cameraIndex, name] of ['top', 'left', 'right'].entries()) {
     for (const object of record.cameras[name]) {
       const [x1, y1, x2, y2] = object.bbox_xyxy_px;
@@ -480,16 +495,69 @@ function draw(record) {
       const label = object.confidence == null ? object.label : object.label + ' ' + Math.round(object.confidence * 100) + '%';
       context.strokeStyle = color;
       context.strokeRect(x, y1, x2 - x1, y2 - y1);
-      const labelY = Math.max(0, y1 - 23);
+      const labelHeight = font + 2 * pad, labelY = Math.max(0, y1 - labelHeight);
       context.fillStyle = '#141414';
-      context.fillRect(x, labelY, context.measureText(label).width + 8, 22);
+      context.fillRect(x, labelY, context.measureText(label).width + 2 * pad, labelHeight);
       context.fillStyle = color;
-      context.fillText(label, x + 4, labelY + 17);
+      context.fillText(label, x + pad, labelY + pad + font * 0.85);
     }
   }
 }
+// Camera view: all three cameras, or one of them. The recorded video holds the cameras side by side; a
+// single view widens the video and its box layer together and shows one third, so boxes stay on objects.
+const viewButtons = [...$('views').querySelectorAll('button')];
+const cameraLabels = [...$('camera-labels').children];
+let view = -1;  // -1: overview, else the camera's index in the video
+function setView(index) {
+  view = Number.isInteger(index) && index >= 0 && index < cameraLabels.length ? index : -1;
+  const single = view >= 0, tiles = cameraLabels.length || 1;
+  const wrapStyle = $('video-wrap').style;
+  wrapStyle.setProperty('--zoom', single ? tiles : 1);
+  wrapStyle.setProperty('--offset', single ? view : 0);
+  if (video.videoWidth && video.videoHeight) {
+    wrapStyle.setProperty('--aspect', video.videoWidth / video.videoHeight / (single ? tiles : 1));
+  }
+  video.controls = !single;  // the native bar would be cut off; play from the 3D review or click the video
+  viewButtons.forEach(button => button.setAttribute('aria-pressed', String(Number(button.dataset.view) === view)));
+  cameraLabels.forEach((label, i) => { label.hidden = single && i !== view; });
+  try { localStorage.setItem('dreambench-camera-view', String(view)); } catch {}
+  requestAnimationFrame(() => draw(detections?.[current]));
+}
+viewButtons.forEach(button => button.addEventListener('click', () => setView(Number(button.dataset.view))));
+video.addEventListener('click', () => { if (view >= 0) isPlaying() ? pause() : play(); });
+window.addEventListener('resize', () => draw(detections?.[current]));
+
+// Full screen the video together with its box layer. The browser's own video full screen shows the
+// video element alone, so it is redirected here; the stage keeps the video's aspect ratio so the
+// boxes stay on the picture.
+const videoWrap = $('video-wrap');
+const fullscreenElement = () => document.fullscreenElement ?? document.webkitFullscreenElement ?? null;
+function enterFullscreen() {
+  const request = videoWrap.requestFullscreen ?? videoWrap.webkitRequestFullscreen;
+  if (request) Promise.resolve(request.call(videoWrap)).catch(() => {});
+}
+function toggleFullscreen() {
+  if (fullscreenElement()) (document.exitFullscreen ?? document.webkitExitFullscreen).call(document);
+  else enterFullscreen();
+}
+$('fullscreen').onclick = toggleFullscreen;
+video.addEventListener('dblclick', event => { event.preventDefault(); toggleFullscreen(); });
+for (const name of ['fullscreenchange', 'webkitfullscreenchange']) {
+  document.addEventListener(name, () => {
+    const element = fullscreenElement();
+    if (element === video) {  // entered from the browser's video menu: move to the wrapper instead
+      Promise.resolve((document.exitFullscreen ?? document.webkitExitFullscreen).call(document))
+        .then(enterFullscreen, enterFullscreen);
+      return;
+    }
+    $('fullscreen').textContent = element === videoWrap ? '✕ Exit full screen' : '⛶ Full screen';
+    draw(detections?.[current]);
+  });
+}
 const frameAt = seconds => Math.floor(seconds * 20 + 1e-6);
-video.addEventListener('loadedmetadata', () => {
+function onMetadata() {
+  if (mediaReady) return;
+  setView(view);  // the aspect ratio needs the video size
   const resume = clockPlaying;  // hand playback over from the wall clock to the video
   stopClock();
   mediaReady = true;
@@ -500,7 +568,8 @@ video.addEventListener('loadedmetadata', () => {
     setFrame(Math.max(current, 0), 'sync');  // keep the frame chosen while the video loaded
   }
   if (resume) play();
-});
+}
+video.addEventListener('loadedmetadata', onMetadata);
 video.addEventListener('timeupdate', () => setFrame(frameAt(video.currentTime), 'video'));
 video.addEventListener('seeked', () => setFrame(frameAt(video.currentTime), 'video'));
 if (video.requestVideoFrameCallback) {
@@ -570,6 +639,7 @@ $('previous-collision').onclick = () => seekCollision(-1);
 $('next-collision').onclick = () => seekCollision(1);
 document.addEventListener('keydown', event => {
   if (event.target.matches('input[type=number], select, textarea')) return;
+  if ((event.key === 'f' || event.key === 'F') && !event.ctrlKey && !event.metaKey && !event.altKey) toggleFullscreen();
   if (event.key === ' ' && !event.target.matches('button, video')) {
     event.preventDefault();
     isPlaying() ? pause() : play();
@@ -591,12 +661,17 @@ $('export-frame').onclick = () => {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 };
 
+try { setView(Number(localStorage.getItem('dreambench-camera-view') ?? -1)); } catch { setView(-1); }
+
 if (rows.length) {
   const requested = Number(new URLSearchParams(location.search).get('t'));
   setFrame(Number.isFinite(requested) ? frameAt(Math.max(0, requested)) : 0, 'start');
 } else {
   $('position').textContent = 'No frames';
 }
+// The video can finish loading its metadata while the parser is still reading the embedded rows,
+// before the listener above exists; without this the camera views would never follow the timeline.
+if (video.readyState >= HTMLMediaElement.HAVE_METADATA) onMetadata();
 loadReview();
 </script></html>"""
 
@@ -610,9 +685,12 @@ def replay_html(rows: list[dict], *, detections: list[dict] | None = None,
     """Build the replay page. It needs only its sibling video.mp4; the 3D review needs the workbench.
     With detections, the YOLO boxes are drawn on the camera views; detection_note says where they came from or why not."""
     labels = "".join(f"<span>{escape(CAMERA_LABELS.get(camera, camera))}</span>" for camera in cameras)
+    views = [("-1", "Overview")] + [(str(i), CAMERA_LABELS.get(camera, camera)) for i, camera in enumerate(cameras)]
+    buttons = "".join(f'<button type="button" data-view="{value}" aria-pressed="false">{escape(label)}</button>'
+                      for value, label in views)
     if detection_note is None:
         detection_note = "YOLO boxes are drawn on the camera views." if detections else ""
-    replacements = {"__CSS__": "\n" + WORKBENCH_CSS + REPLAY_CSS, "__CAMERA_LABELS__": labels,
+    replacements = {"__CSS__": "\n" + WORKBENCH_CSS + REPLAY_CSS, "__CAMERA_LABELS__": labels, "__VIEW_BUTTONS__": buttons,
                     "__DETECTION_NOTE__": escape(detection_note),
                     "__COLORS__": _json(CATEGORY_COLORS), "__DETECTIONS__": _json(detections), "__ROWS__": _json(rows)}
     # One pass, so recorded text that happens to contain a marker is never substituted.

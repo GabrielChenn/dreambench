@@ -49,9 +49,11 @@ class ReplayPageTests(unittest.TestCase):
         page = replay_html([{"frame": 0, "sim_seconds": 0.0, "note": "__ROWS__ </script><b>"}])
         for control in ('id="timeline"', 'id="events"', 'id="review-image"', 'id="next-collision"',
                         'id="previous-collision"', 'id="follow"', 'id="contact-values"', 'id="object-values"',
-                        'id="play"', 'id="speed"', 'id="video"'):
+                        'id="play"', 'id="speed"', 'id="video"', 'id="fullscreen"', 'controlslist="nofullscreen"'):
             self.assertIn(control, page)
         self.assertNotIn("</script><b>", page)
+        for view, label in (("-1", "Overview"), ("0", "Overhead"), ("1", "Left wrist"), ("2", "Right wrist")):
+            self.assertIn(f'data-view="{view}" aria-pressed="false">{label}</button>', page)
         self.assertEqual(page.count("__ROWS__"), 1)  # the recorded text, not a second substitution
 
 
