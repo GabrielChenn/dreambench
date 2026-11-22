@@ -27,6 +27,8 @@ def read():
         message = json.loads(line)
         if message["command"] == "stop":
             stop.set()
+        elif message["command"] == "camera":
+            print("camera " + json.dumps(message, sort_keys=True), flush=True)  # handled off the main loop
         elif message["command"] == "crash":
             import os
             os._exit(3)  # a simulator crash can happen mid-experiment
@@ -34,6 +36,7 @@ def read():
             commands.put(message)
     commands.put({"command": "quit"})
 threading.Thread(target=read, daemon=True).start()
+emit(camera={"azimuth": 90, "elevation": -30, "distance": 1.5, "lookat": [0, 0, 0.8]})
 emit(state="idle")
 while True:
     message = commands.get()
@@ -90,6 +93,19 @@ class SimWorkspaceTests(unittest.TestCase):
         self.start_idle()
         wait_for(lambda: self.sim.viewport_frame() is not None)
         self.assertTrue(self.sim.viewport_frame().startswith(b"\xff\xd8"))
+
+    def test_viewport_camera_is_forwarded_and_remembered(self) -> None:
+        self.start_idle()
+        default = {"azimuth": 90.0, "elevation": -30.0, "distance": 1.5, "lookat": [0.0, 0.0, 0.8]}
+        self.assertEqual((self.sim.status()["camera"], self.sim.status()["default_camera"]), (default, default))
+        moved = self.sim.set_camera({"azimuth": -30, "elevation": -120, "distance": 99, "lookat": [0.1, 0.2, 0.3]})
+        self.assertEqual(moved, {"azimuth": 330.0, "elevation": -89.0, "distance": 6.0, "lookat": [0.1, 0.2, 0.3]})
+        self.assertEqual(self.sim.status()["camera"], moved)  # a reloaded page gets the same view
+        wait_for(lambda: any('"view"' in line for line in self.sim.lines))
+        self.assertEqual(self.sim.set_camera(None), default)
+        wait_for(lambda: any('"reset": true' in line for line in self.sim.lines))
+        with self.assertRaises(ValueError):
+            self.sim.set_camera({"azimuth": "x", "elevation": 0, "distance": 1, "lookat": [0, 0, 0]})
 
     def test_experiment_completes_with_report(self) -> None:
         self.start_idle()

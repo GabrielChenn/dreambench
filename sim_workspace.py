@@ -26,6 +26,7 @@ import queue
 import sys
 import threading
 import time
+from typing import Callable
 from uuid import uuid4
 
 from compare_replays import request_count, run_experiment, run_yolo, trial_metadata, validate_config
@@ -75,6 +76,7 @@ class Commands:
 
     def __init__(self, stream) -> None:
         self.queue: queue.Queue = queue.Queue()
+        self.on_camera: Callable[[dict], None] | None = None  # handled on this thread, even during a trial
         self.tokens: list[threading.Event] = []
         self.lock = threading.Lock()
         self.stream = stream
@@ -89,6 +91,10 @@ class Commands:
             except ValueError:
                 continue
             if not isinstance(message, dict):
+                continue
+            if message.get("command") == "camera":
+                if self.on_camera is not None:
+                    self.on_camera(message)
                 continue
             with self.lock:
                 if message.get("command") in STOP_COMMANDS:
@@ -132,6 +138,15 @@ class Workspace:
             args.viewport_jpeg, yam_env.VIEWER_LOOKAT, yam_env.VIEWER_DISTANCE,
             yam_env.VIEWER_AZIMUTH, yam_env.VIEWER_ELEVATION) if args.viewport_jpeg else None
         self.viewer = None
+
+    def set_camera(self, message: dict) -> None:
+        """Move the Web viewport camera ({"reset": true} restores the default). Called from the stdin thread."""
+        if self.env.viewport is None:
+            return
+        try:
+            self.env.viewport.set_camera(None if message.get("reset") else message.get("view"))
+        except ValueError as error:
+            print(f"  Ignored viewport camera: {error}", flush=True)
 
     # Keep the viewer and Web viewport alive between commands.
     def refresh(self, *, force: bool = False) -> None:
@@ -275,6 +290,9 @@ def main() -> None:
     commands = Commands(sys.stdin)
     commands.start()
     workspace = Workspace(args, dream_control, yam_env, trial_recorder)
+    if workspace.env.viewport is not None:
+        commands.on_camera = workspace.set_camera
+        emit(camera=workspace.env.viewport.default)  # the page starts from, and resets to, this view
     try:
         if args.viewer:
             import mujoco.viewer

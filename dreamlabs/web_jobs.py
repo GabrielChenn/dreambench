@@ -13,6 +13,8 @@ import tempfile
 from threading import Lock, Thread
 from uuid import uuid4
 
+from .viewport_camera import clean_camera
+
 EVENT_PREFIX = "@@sim "
 
 
@@ -38,6 +40,8 @@ class SimWorkspace:
         self.notice: str | None = None
         self.job: dict | None = None
         self.lines: deque[str] = deque(maxlen=30)
+        self.default_camera: dict | None = None  # from the simulator at start-up
+        self.camera: dict | None = None          # the page's current view, kept across page reloads
         self.closed = False
         self.directory = Path(tempfile.mkdtemp(prefix="dreambench-sim-"))
         self.viewport = self.directory / "viewport.jpg"
@@ -122,6 +126,11 @@ class SimWorkspace:
     def _event(self, event: dict) -> None:
         with self.lock:
             name = event.get("event")
+            if "camera" in event:
+                try:
+                    self.default_camera = self.camera = clean_camera(event["camera"])
+                except ValueError:
+                    pass
             if name in ("reset_done", "reset_robot_done"):
                 # Kept on the idle message that follows, so the page can see the reset finished.
                 self.notice = "Scene reset" if name == "reset_done" else "Arms at home"
@@ -195,7 +204,8 @@ class SimWorkspace:
     # Status -------------------------------------------------------------------------------------
     def status(self) -> dict:
         with self.lock:
-            return {"state": self.state, "message": self.message,
+            return {"state": self.state, "message": self.message, "camera": self.camera,
+                    "default_camera": self.default_camera,
                     "job": {**self.job, "log": list(self.lines)} if self.job else None}
 
     def snapshot(self, job_id: str) -> dict | None:
@@ -203,6 +213,20 @@ class SimWorkspace:
             if self.job is None or self.job["id"] != job_id:
                 return None
             return {**self.job, "log": list(self.lines)}
+
+    def set_camera(self, view: object) -> dict:
+        """Move the live viewport camera to view, or back to the default for None. Returns the view used.
+
+        Allowed during an experiment: the simulator applies it on its command thread without pausing the trial."""
+        with self.lock:
+            default = self.default_camera
+        if default is None:
+            raise ValueError("The viewport is not ready yet.")
+        camera = default if view is None else clean_camera(view)
+        self._send({"command": "camera", "reset": True} if view is None else {"command": "camera", "view": camera})
+        with self.lock:
+            self.camera = camera
+        return camera
 
     def viewport_frame(self) -> bytes | None:
         try:

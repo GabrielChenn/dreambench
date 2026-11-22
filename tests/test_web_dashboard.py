@@ -77,7 +77,7 @@ class LocalServerTests(unittest.TestCase):
         self.assertEqual(status, 400)
 
     def test_sim_controls_require_page_origin(self) -> None:
-        for path in ("/api/sim/stop", "/api/sim/reset", "/api/sim/reset_robot", "/api/jobs"):
+        for path in ("/api/sim/stop", "/api/sim/reset", "/api/sim/reset_robot", "/api/jobs", "/api/sim/camera"):
             with self.subTest(path=path):
                 self.assertEqual(self.post(path, {}, origin=False)[0], 403)
 
@@ -87,6 +87,11 @@ class LocalServerTests(unittest.TestCase):
             status, body = self.post("/api/jobs", payload)
         self.assertEqual(status, 400)
         self.assertIn("Untick YOLO", body["error"])
+
+    def test_camera_before_the_viewport_is_ready(self) -> None:
+        status, body = self.post("/api/sim/camera", {"reset": True})
+        self.assertEqual(status, 400)
+        self.assertIn("not ready", body["error"])
 
     def test_stop_without_experiment_conflicts(self) -> None:
         self.assertEqual(self.post("/api/sim/stop", {})[0], 409)

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import threading
 import time
 from typing import Callable
 
@@ -22,6 +23,7 @@ from .replay_page import CAMERAS, write_replay
 from .scenarios import DEFAULT_SCENE_ID, SCENES, Scene
 from .scene_inventory import discover
 from .scoring import contacts_key
+from .viewport_camera import clean_camera
 
 FPS = 20
 VIEWPORT_PERIOD_S = 0.16
@@ -141,7 +143,9 @@ class TrialRecorder:
 
 
 class ViewportPublisher:
-    """Save the free 3D viewer angle as a JPEG for the Web page, at most every 0.16 s."""
+    """Save the free 3D viewer angle as a JPEG for the Web page, at most every 0.16 s.
+
+    The page can move the camera (set_camera) from another thread; the change is applied at the next publish."""
 
     def __init__(self, path: Path, lookat, distance: float, azimuth: float, elevation: float) -> None:
         from PIL import Image
@@ -150,11 +154,29 @@ class ViewportPublisher:
         self.path = path
         self.camera = mujoco.MjvCamera()
         mujoco.mjv_defaultCamera(self.camera)
-        self.camera.lookat[:] = lookat
-        self.camera.distance, self.camera.azimuth, self.camera.elevation = distance, azimuth, elevation
+        self.default = clean_camera({"azimuth": float(azimuth), "elevation": float(elevation),
+                                     "distance": float(distance), "lookat": [float(v) for v in lookat]})
+        self.lock = threading.Lock()
+        self.pending: dict | None = None
+        self.apply(self.default)
         self.last = float("-inf")
 
+    def apply(self, view: dict) -> None:
+        self.camera.lookat[:] = view["lookat"]
+        self.camera.distance, self.camera.azimuth, self.camera.elevation = (
+            view["distance"], view["azimuth"], view["elevation"])
+
+    def set_camera(self, view: dict | None) -> None:
+        """Move the camera to view ({azimuth, elevation, distance, lookat}), or back to the default for None."""
+        with self.lock:
+            self.pending = self.default if view is None else clean_camera(view)
+
     def publish(self, env, *, force: bool = False) -> None:
+        with self.lock:
+            pending, self.pending = self.pending, None
+        if pending is not None:
+            self.apply(pending)
+            force = True  # show the new angle right away
         now = time.monotonic()
         if not force and now - self.last < VIEWPORT_PERIOD_S:
             return

@@ -334,7 +334,7 @@ def make_handler(root: Path, sim: SimWorkspace, review: ReviewRenderer | None = 
             return json.loads(self.rfile.read(size))
 
         def do_POST(self) -> None:
-            if self.path not in ("/api/jobs", "/api/config/resolve", *SIM_COMMANDS):
+            if self.path not in ("/api/jobs", "/api/config/resolve", "/api/sim/camera", *SIM_COMMANDS):
                 self.send_error(404)
                 return
             host = self.local_host()
@@ -349,6 +349,10 @@ def make_handler(root: Path, sim: SimWorkspace, review: ReviewRenderer | None = 
                     config = validate_config(payload.get("config"))
                     self.json_response(200, {"task": {key: config[key] for key in TASK_FIELDS},
                                              "note": GENERIC_NOTE if config["tier"] == "generic" else None})
+                    return
+                if self.path == "/api/sim/camera":  # {"view": {...}} or {"reset": true}
+                    view = None if payload.get("reset") is True else payload.get("view")
+                    self.json_response(200, {"camera": sim.set_camera(view)})
                     return
                 if self.path in SIM_COMMANDS:
                     sim.command(SIM_COMMANDS[self.path])

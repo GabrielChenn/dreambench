@@ -150,6 +150,16 @@ class CommandsTests(unittest.TestCase):
         self.assertEqual([commands.next(0)["command"], commands.next(0)["command"]], ["reset", "quit"])
         self.assertIsNone(commands.next(0))
 
+    def test_camera_is_handled_on_the_reader_thread(self) -> None:
+        import sim_workspace
+
+        commands = sim_workspace.Commands(io.StringIO(json.dumps({"command": "camera", "reset": True}) + "\n"))
+        seen = []
+        commands.on_camera = seen.append
+        commands.read()
+        self.assertEqual(seen, [{"command": "camera", "reset": True}])
+        self.assertEqual(commands.next(0)["command"], "quit")  # nothing queued for the busy main loop
+
 
 if __name__ == "__main__":
     unittest.main()
