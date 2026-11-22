@@ -23,7 +23,8 @@ button{border:0;background:var(--accent);color:#081d19;font-weight:700;padding:.
 button:disabled{opacity:.55;cursor:default}
 :focus-visible{outline:2px solid var(--accent);outline-offset:3px}
 pre{white-space:pre-wrap;overflow-wrap:anywhere;padding:.8rem;border-radius:.45rem;background:#0c131e;color:#d3e5f6;max-height:26rem;overflow:auto}
-.run-options{margin:1rem 0}.run-options input[type=checkbox]{display:inline;width:auto;margin:0 .4rem 0 0}
+.run-options{margin:0 0 1rem}
+.preview{border-top:1px solid var(--line);margin-top:1rem;padding-top:1rem}.run-options input[type=checkbox]{display:inline;width:auto;margin:0 .4rem 0 0}
 .secondary{background:#26364a;color:var(--ink)}.danger{background:#5a2733;color:#ffd7de}
 .controls{display:flex;flex-wrap:wrap;gap:.5rem;margin:.6rem 0}
 .viewport-panel{margin-top:1.5rem}
@@ -73,12 +74,14 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;padding:.8rem;border-radius:.45r
 </div>
 </fieldset>
 </form>
-</section>
-<section aria-label="Configuration preview">
-<h2>Configuration preview</h2>
+<div class="preview" aria-labelledby="preview-title">
+<h2 id="preview-title">Configuration preview</h2>
 <p id="status" class="status" role="status" aria-live="polite"></p>
 <pre id="preview"></pre>
 <button id="download" type="button" class="secondary">Download config</button>
+</div>
+</section>
+<section aria-label="Run locally">
 <fieldset class="run-options">
 <legend>Run locally</legend>
 <p id="connection" class="status" role="status">Checking the local server…</p>
