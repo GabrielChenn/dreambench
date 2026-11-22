@@ -61,7 +61,7 @@ class LocalServerTests(unittest.TestCase):
 
     def test_resolve_reads_task_from_prompt(self) -> None:
         for prompt, task in (("put orange into the bowl", "orange-in-bowl"),
-                             ("把香蕉放到盘子上", "banana-on-plate"),
+                             ("put the banana on the plate", "banana-on-plate"),
                              ("put apple into the bowl", "apple-in-bowl")):
             with self.subTest(prompt=prompt):
                 status, body = self.post("/api/config/resolve", {"config": self.config(prompt)})

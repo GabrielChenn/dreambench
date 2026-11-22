@@ -1,7 +1,7 @@
-"""Infer the judged task from a Dream-1 prompt, in English or Chinese. Rule-based; calls no LLM.
+"""Infer the judged task from an English Dream-1 prompt. Rule-based; calls no LLM.
 
-"put orange into the bowl" and "把橙子放进碗里" both name one movable object and one support of the
-scene, so they map to orange-in-bowl and its scorer. Ported from dreambench_bk/judge_dashboard.py.
+"put orange into the bowl" names one movable object and one support of the scene, so it maps to
+orange-in-bowl and its scorer. Ported from dreambench_bk/judge_dashboard.py.
 """
 
 from __future__ import annotations
@@ -15,14 +15,10 @@ from .scoring import GENERIC, TaskSpec, phrase, task_for
 # spaces for underscores) and its plural are added automatically, so a body added to the scene can be
 # named in English without editing this table. Words for bodies the scene lacks are ignored.
 ALIASES = {
-    "苹果": "apple",
-    "橙子": "orange", "橘子": "orange", "桔子": "orange",
-    "香蕉": "banana",
-    "bottle": "water_bottle", "bottles": "water_bottle", "水瓶": "water_bottle", "瓶子": "water_bottle",
-    "矿泉水": "water_bottle",
-    "碗": "bowl", "dish": "plate", "盘子": "plate", "盘": "plate",
+    "bottle": "water_bottle", "bottles": "water_bottle",
+    "dish": "plate",
 }
-PLACE_VERBS = ("put", "place", "move", "drop", "set", "transfer", "pick", "放", "移", "拿", "搬", "装")
+PLACE_VERBS = ("put", "place", "move", "drop", "set", "transfer", "pick")
 MAX_PROMPT = 500
 GENERIC_NOTE = ("Generic placement rule: this pair was not calibrated in MuJoCo. The verdict uses contacts "
                 "only, so check the replay before trusting it.")
@@ -44,8 +40,7 @@ def find_terms(text: str, words: dict[str, str]) -> list[str]:
     found: list[tuple[int, str]] = []
     lower = text.lower()
     for word, name in words.items():
-        pattern = re.escape(word) if not word.isascii() else rf"\b{re.escape(word)}\b"
-        match = re.search(pattern, lower)
+        match = re.search(rf"\b{re.escape(word)}\b", lower)
         if match:
             found.append((match.start(), name))
     ordered: list[str] = []
@@ -60,7 +55,7 @@ def parse_prompt(text: str, scene: Inventory | None = None) -> TaskSpec:
     scene = scene or load_inventory()
     text = " ".join(str(text).split())
     if not text:
-        raise ValueError("Describe the task, e.g. “put the apple into the bowl” or “把苹果放进碗里”.")
+        raise ValueError("Describe the task, e.g. “put the apple into the bowl”.")
     if len(text) > MAX_PROMPT:
         raise ValueError(f"Keep the prompt under {MAX_PROMPT} characters.")
     objects = find_terms(text, vocabulary(scene.objects))
@@ -74,7 +69,7 @@ def parse_prompt(text: str, scene: Inventory | None = None) -> TaskSpec:
     if len(targets) > 1:
         raise ValueError(f"Name one destination per run. Found: {', '.join(map(phrase, targets))}.")
     if not any(verb in text.lower() for verb in PLACE_VERBS):
-        raise ValueError("Say what to do with it, e.g. “put … into …” or “把…放进…”.")
+        raise ValueError("Say what to do with it, e.g. “put … into …”.")
     return task_for(objects[0], targets[0])
 
 

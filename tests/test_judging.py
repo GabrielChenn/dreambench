@@ -245,11 +245,10 @@ class ConfigTests(unittest.TestCase):
 class ParsePromptTests(unittest.TestCase):
     def test_every_object_and_container(self) -> None:
         cases = {
-            "Please put the apple into the bowl": "apple-in-bowl", "把苹果放进碗里": "apple-in-bowl",
-            "put orange into the bowl": "orange-in-bowl", "把橙子放进碗里": "orange-in-bowl",
-            "put the banana on the plate": "banana-on-plate", "把香蕉放进碗里": "banana-in-bowl",
-            "place the apple on the plate": "apple-on-plate", "把橘子放到盘子上": "orange-on-plate",
-            "put the water bottle into the bowl": "water-bottle-in-bowl", "把水瓶放到盘子上": "water-bottle-on-plate",
+            "Please put the apple into the bowl": "apple-in-bowl", "place the apple on the plate": "apple-on-plate",
+            "put orange into the bowl": "orange-in-bowl", "move the orange onto the dish": "orange-on-plate",
+            "drop the banana in the bowl": "banana-in-bowl", "put the banana on the plate": "banana-on-plate",
+            "put the water bottle into the bowl": "water-bottle-in-bowl", "set the bottle on the plate": "water-bottle-on-plate",
         }
         for text, expected in cases.items():
             with self.subTest(text=text):

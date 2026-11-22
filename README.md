@@ -9,7 +9,7 @@ A learned policy is stochastic and sensitive to what it sees. A single run in th
 | Feature | Summary |
 | --- | --- |
 | Single runs and A/B comparisons | Run one configuration, or a baseline and a candidate that differ in exactly one field: the prompt, or the number of actions executed per Dream-1 response. |
-| Task read from the prompt | "put orange into the bowl" is judged as `orange-in-bowl`. English and Chinese prompts are recognized. |
+| Task read from the prompt | An English prompt such as "put orange into the bowl" is judged as `orange-in-bowl`. |
 | Ground-truth judging | Calibrated scorers for all eight object/container pairs. Each trial is **successed** or **failed**, with a one-line account of what happened to the object. |
 | Random scene layouts | Up to nine seeded random layouts per experiment. Every movable object is moved, overlaps are redrawn before any request, and the report opens with a generalization table. |
 | Failure modes | Each trial is classified, for example "grasp failed" or "dropped or placed off target", and modes are counted across layouts. |
