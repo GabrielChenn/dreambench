@@ -31,6 +31,7 @@ from uuid import uuid4
 
 from compare_replays import request_count, run_experiment, run_yolo, trial_metadata, validate_config
 from dreamlabs.home_watchdog import DEFAULT_DEPART_RAD, DEFAULT_JOINTS, DEFAULT_TOLERANCE_RAD, HomeWatchdog
+from dreamlabs.perturbation import layout_from
 from dreamlabs.scenarios import SCENES
 
 EVENT_PREFIX = "@@sim "
@@ -176,13 +177,20 @@ class Workspace:
         self.refresh(force=True)
         print("  Arms at home.", flush=True)
 
+    def place(self, config: dict) -> str | None:
+        """Reset to the condition's layout (scene and moved objects); return why its start is unusable."""
+        self.env.scene = SCENES[config["scene_id"]]
+        self.env.layout = layout_from(config.get("object_offsets"))
+        self.env.reset()
+        self.refresh(force=True)
+        return self.env.start_conflict()
+
     def trial(self, stop: threading.Event, parent: Path, config: dict, label: str) -> Path:
         """Record one trial in this scene: reset it, run Dream-1, judge from what was recorded."""
         trial = config[label]
         folder = parent / label
         folder.mkdir()
-        self.env.scene = SCENES[config["scene_id"]]
-        self.env.reset()
+        self.place(config)
         home = threading.Event()
         watchdog = None
         if config.get("auto_stop_home_seconds"):
@@ -236,10 +244,12 @@ class Workspace:
             config = validate_config(message.get("config"))
             config["yolo"] = message.get("yolo") is True
             output = (Path(self.args.output_dir) / f"comparison-{uuid4().hex[:12]}").resolve()
-            report = run_experiment(config, output, lambda *trial: self.trial(stop, *trial), stop.is_set)
+            report = run_experiment(config, output, lambda *trial: self.trial(stop, *trial), stop.is_set,
+                                    preflight=self.place)
         except Exception as failure:  # report it to the page; keep the scene alive
             error = str(failure) or type(failure).__name__
             print(f"  Experiment failed: {error}", flush=True)
+        self.env.layout = None  # Reset after the experiment restores the unmoved layout
         emit(event="experiment_finished", job_id=job_id, report=str(report) if report else None,
              stopped=stop.is_set(), error=error)
 

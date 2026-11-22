@@ -156,7 +156,8 @@ class VerdictDisplayTests(unittest.TestCase):
              "diagnostics": {"summary": "The orange ended resting in the bowl with the arms and table clear."}},
             {"outcome": "task-failure", "verdict": "timeout stopped", "stop_reason": "home", "tier": "generic"})
         self.assertIn('class="pill successed">successed', page)
-        self.assertIn('class="pill timeout-stopped">timeout stopped', page)
+        self.assertIn('class="pill failed">failed', page)  # an older report's "timeout stopped" reads as failed
+        self.assertNotIn("timeout stopped", page)
         self.assertIn("What happened: The orange ended resting in the bowl", page)
         self.assertIn("Arms back home", page)
         self.assertIn("Generic placement rule", page)

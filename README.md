@@ -7,7 +7,9 @@ DreamBench is a local regression workbench for Dream-1 developers. Compare a pro
 - One real apple-in-bowl comparison ran with identical recorded initial states, Dream-1 Beta, and a 120-second limit. The 48-action baseline failed and the 24-action candidate passed. The result calls for a repeat trial.
 - The local Web workbench opens saved comparisons and exports experiment JSON. The CLI accepts prompt or action-limit comparisons for apple-in-bowl. The prompt comparison path was verified with a mocked simulator.
 - Both the default tabletop and a fixed apple-offset layout are registered and can run individually. A single experiment can compare both layouts and show per-scene outcomes and replay links. The joint flow was verified with simulated runs. A fresh four-trial experiment is the next validation.
-- The judged task is read from the prompt. All eight pairs of the four movable objects (apple, banana, orange, water bottle) and two containers (bowl, plate) have calibrated scorers. Any other pair uses a generic contact rule. Each trial is judged **successed**, **failed** or **timeout stopped**. The page also explains what happened to the object. This judging was ported from the `dreambench_bk` work.
+- The judged task is read from the prompt. All eight pairs of the four movable objects (apple, banana, orange, water bottle) and two containers (bowl, plate) have calibrated scorers. Any other pair uses a generic contact rule. Each trial is judged **successed** or **failed**. The page also explains what happened to the object. This judging was ported from the `dreambench_bk` work.
+- An experiment can draw up to nine seeded random layouts, each moving every movable object, and report a generalization table. Draws that overlap another body are redrawn before any API call. Verified with a scripted policy in the real MuJoCo scene and dry runs. A Dream-1 grid run is the next validation.
+- Every trial gets a failure mode and a real-robot safety level (pass, review or block). Both were checked on existing real recordings, re-scored offline.
 - The Web workbench keeps one simulator running, so **Reset**, **Reset robot** and **Stop** work like Dream YAM Sim's `/reset`, `/reset_robot` and stop. These controls and the judging were verified with dry runs and a scripted policy in the real MuJoCo scene, without API calls. A judged Dream-1 run is the next validation.
 
 ## Quick start
@@ -29,7 +31,7 @@ On the configuration page, write the prompt and set the model, time limit, home 
 | **Reset robot** | Drives the arms home over 2 s and leaves the objects where they are. Stops a running experiment. |
 | **Stop** | Stops the running trial after the current step and saves and judges its recording. The remaining trials are not run. |
 
-**Stop after arms home** ends a trial once the shoulders and elbows have left their starting pose, come back, and stayed there for that many simulated seconds. The default is 5. Use 0 to turn it off. A trial that ends this way without placing the object is judged **timeout stopped**.
+**Stop after arms home** ends a trial once the shoulders and elbows have left their starting pose, come back, and stayed there for that many simulated seconds. The default is 5. Use 0 to turn it off. A trial that ends this way without placing the object is judged **failed**, and its card shows it ended with the arms back home.
 
 The simulator uses `~/dream-env/bin/python` by default when available. Use `--runner-python /path/to/python` for another environment, `--sim-viewer` to also open the desktop MuJoCo window, or `--no-sim` to start the simulator only when the page first needs it. If the simulator exits, **Reset** starts it again. To run the same experiment from the CLI, download the JSON and run:
 
@@ -86,6 +88,34 @@ You can also run the default 48 vs 24 comparison in both layouts directly. Use
 source ~/dream-env/bin/activate
 python compare_replays.py --run --scene yam-tabletop-default --scene yam-tabletop-offset --viewer
 ```
+
+## Generalization: random scene layouts
+
+A learned policy can succeed in the default layout and fail when things are a few centimetres away. To test this, tick **Randomize the scene layout to test generalization** on the configuration page and set the number of layouts (1–9), the range (± cm along MuJoCo world x and y) and the seed. **New seed** draws another set. In JSON the field is `"random_starts": {"count": 5, "max_offset_m": 0.04, "seed": 1234}`. From the CLI:
+
+```sh
+python compare_replays.py --run --random-starts 5 --max-offset 0.04 --seed 1234
+```
+
+In each layout, every movable object (apple, banana, orange, water bottle) gets its own offset, drawn uniformly from the seed. The bowl and plate stay where they are. Without `--seed` the CLI picks a new seed and saves it in the report. Before any Dream-1 request, each layout is checked in the simulator. A layout where an object is inside another body (fruit, bowl, plate, an arm) or off the table is redrawn. The same seed and scene give the same layouts. Each layout runs the same single run, or the same baseline and candidate, and each trial uses Dream-1 credits.
+
+The report opens with one generalization table. Each row is one layout: every object's Δx, Δy in cm (the judged object is marked), the verdict (**successed** or **failed**), and the replay link in the last column. The footer counts each verdict. The panel also notes how many overlapping draws were redrawn. Each row is a single trial, so read it as an observation, not a success rate.
+
+## Failure modes
+
+Each trial gets a failure mode, read from simulator ground truth (the judged object's contacts and trajectory): **Successed**, **Never reached the object**, **Knocked away**, **Grasp failed**, **Still holding at the end**, **Dropped or placed off target**, **Not released cleanly**, **On target, not settled**, or **Not scored**. The mode appears under each verdict in the generalization table and on each trial card. Reports with more than one condition also get a **Failure modes** table that counts each mode per arm and lists the layouts (#) in it. A mode says what happened, not why the model did it.
+
+## Real-robot safety gate
+
+Each new trial is checked for what would be unsafe to repeat on hardware. The report shows the worst level per arm and every rule that fired:
+
+| Level | Rule |
+| --- | --- |
+| **block** | The arms hit each other. Dream-1 commanded a joint target outside the YAM URDF limits, or a gripper target outside 0–1. The simulator clamps such targets. A real driver may not, and the Dream docs say model actions are not checked against a robot's limits. |
+| **review** | An arm hit the table, an object or container, or itself. |
+| info | Peak measured joint speed and the largest step between consecutive commands. The Dream docs give no YAM speed limit, so these have no threshold. |
+
+In this simulator the folded right arm's link2 and link5 touch in many runs (joints 2 and 3 at 0, joint 4 near −0.23 rad). The collision parts are approximate convex shapes, so this may be a collision-model artifact. It is reported as review, not block. Contacts are sampled at 20 Hz, forces are simulated rather than calibrated, and the joint 2 and 3 lower limits equal the home angle, so nearness to a limit is not used. Reports recorded before this check show safety as unavailable. Re-score them with `compare_replays.py --existing BASELINE CANDIDATE`.
 
 ## Motion quality in reports
 

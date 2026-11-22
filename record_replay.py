@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from dreamlabs.home_watchdog import DEFAULT_DEPART_RAD, DEFAULT_TOLERANCE_RAD, HomeWatchdog, joint_list
 from dreamlabs.replay_page import CAMERAS, write_replay  # noqa: F401 - re-exported for older callers
+from dreamlabs.perturbation import MAX_OFFSET_M, ObjectOffset, layout_dicts
 from dreamlabs.scenarios import DEFAULT_SCENE_ID, SCENES
 
 
@@ -17,6 +18,8 @@ def main() -> None:
     parser.add_argument("--viewport-jpeg", type=Path, help="Publish the latest MuJoCo viewport JPEG")
     parser.add_argument("--output-dir", type=Path, default=Path("outputs"))
     parser.add_argument("--scene", choices=tuple(SCENES), default=DEFAULT_SCENE_ID)
+    parser.add_argument("--object-offset", nargs=3, action="append", metavar=("OBJECT", "DX", "DY"),
+                        help="Move OBJECT by DX, DY metres (world x, y) after each reset. Repeat per object.")
     parser.add_argument("--reproduce-frame", type=Path, help="Re-run one exported simulation step offline")
     parser.add_argument("--check-reset", action="store_true", help="Check this scene twice without rendering or Dream-1")
     parser.add_argument("--task", default="put apple into the bowl")
@@ -33,6 +36,17 @@ def main() -> None:
         parser.error("--seconds must be a positive finite number.")
     if not math.isfinite(args.home_seconds) or args.home_seconds < 0:
         parser.error("--home-seconds must be 0 (off) or a positive number.")
+    layout = []
+    for name, dx, dy in args.object_offset or []:
+        try:
+            offset = ObjectOffset(name, float(dx), float(dy))
+        except ValueError:
+            parser.error("--object-offset takes an object name and two numbers in metres.")
+        if not all(math.isfinite(v) and abs(v) <= MAX_OFFSET_M for v in (offset.dx_m, offset.dy_m)):
+            parser.error(f"Keep --object-offset within ±{MAX_OFFSET_M:g} m.")
+        if any(item.object == name for item in layout):
+            parser.error(f"Give one --object-offset per object: {name} is repeated.")
+        layout.append(offset)
 
     try:
         from dreamlabs.trial_recorder import TrialRecorder, ViewportPublisher, load_upstream, recording_env
@@ -60,6 +74,7 @@ def main() -> None:
     scene = SCENES[args.scene]
     SceneEnv = recording_env(yam_env.YamEnv)
     SceneEnv.scene = scene
+    SceneEnv.layout = tuple(layout) or None
 
     if args.check_reset:
         env = SceneEnv()
@@ -88,6 +103,10 @@ def main() -> None:
 
     output = args.output_dir / f"replay-{uuid4().hex[:12]}"
     env = SceneEnv()
+    env.reset()
+    if (conflict := env.start_conflict()):
+        env.close()
+        parser.error(f"Unusable start: {conflict}. No Dream-1 request was made.")
     home = threading.Event()
     watchdog = None
     if args.home_seconds:
@@ -119,6 +138,9 @@ def main() -> None:
                 for key in ("output_dir", "viewport_jpeg", "reproduce_frame", "check_reset"):
                     metadata.pop(key)
                 metadata["home_joints"] = list(args.home_joints)
+                metadata.pop("object_offset")
+                if layout:
+                    metadata["object_offsets"] = layout_dicts(tuple(layout))
                 metadata.update(status=status, scene_id=args.scene, apple_offset_xyz_m=scene.apple_offset_xyz_m,
                                 stop_reason="home" if recorder.home_stop else ("finished" if status == "finished"
                                                                                else "interrupted"))

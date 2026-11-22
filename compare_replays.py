@@ -2,7 +2,7 @@
 
 The judged task comes from the prompt: "put orange into the bowl" is scored as orange-in-bowl. The
 eight object/container pairs of the YAM tabletop scene have calibrated scorers; any other pair uses
-the generic placement rule. Each trial gets a verdict (successed / failed / timeout stopped) and a
+the generic placement rule. Each trial gets a verdict (successed / failed) and a
 diagnosis of what happened to the object.
 """
 
@@ -21,8 +21,12 @@ from typing import Callable
 from uuid import uuid4
 
 from dreamlabs.contact_events import contact_summary
+from dreamlabs.failure_modes import failure_mode, mode_distribution
 from dreamlabs.home_watchdog import DEFAULT_HOME_SECONDS
+from dreamlabs.perturbation import (DEFAULT_OFFSET_M, MAX_SEED, generalization, layout_dicts, layout_from,
+                                    sample_layouts, validate_random_starts)
 from dreamlabs.scenarios import DEFAULT_SCENE_ID, SCENES
+from dreamlabs.safety import arm_joint_limits, safety_report, safety_summary
 from dreamlabs.scene_inventory import load_inventory
 from dreamlabs.scoring import TASK, resolve_task, score, task_id, verdict
 from dreamlabs.task_parser import parse_prompt
@@ -31,6 +35,7 @@ from dreamlabs.yolo_status import yolo_unavailable
 
 MAX_HOME_SECONDS = 120.0
 TrialRunner = Callable[[Path, dict, str], Path]
+Preflight = Callable[[dict], "str | None"]  # why a condition's start is unusable, or None
 
 
 def read_rows(path: Path) -> list[dict]:
@@ -100,6 +105,10 @@ def validate_config(config: object) -> dict:
     if home is not None and (type(home) not in (int, float) or not (home == 0 or 0.5 <= home <= MAX_HOME_SECONDS)):
         raise ValueError(f"Use 0 (off) or 0.5 to {MAX_HOME_SECONDS:g} seconds for the home auto-stop.")
     config["auto_stop_home_seconds"] = home or None
+    if config.get("random_starts") is not None:
+        config["random_starts"] = validate_random_starts(config["random_starts"])
+    else:
+        config.pop("random_starts", None)
     for name in trial_labels(config):
         run = config.get(name)
         if not isinstance(run, dict):
@@ -133,6 +142,7 @@ def assess(folder: Path) -> dict:
                   scene_id=metadata.get("scene_id", DEFAULT_SCENE_ID if spec else None),
                   scorer=metadata.get("scorer", spec.scorer if spec else None),
                   apple_offset_xyz_m=metadata.get("apple_offset_xyz_m"),
+                  object_offsets=metadata.get("object_offsets"),
                   stop_reason=metadata.get("stop_reason"), home_rule=metadata.get("home_rule"))
     result["verdict"] = verdict(result["outcome"], result["stop_reason"])
     result["initial_state"] = {
@@ -140,6 +150,8 @@ def assess(folder: Path) -> dict:
     } if rows else None
     result["motion_quality"] = trajectory_quality(rows)
     result["contact_summary"] = contact_summary(rows)
+    result["safety"] = safety_report(rows, arm_joint_limits())
+    result["failure_mode"] = failure_mode(result)
     result["wall_elapsed_s"] = metadata.get("experiment_wall_elapsed_s")
     result["reported_api_requests"] = metadata.get("reported_api_requests")
     yolo = folder / "detections-yolo.jsonl"
@@ -175,7 +187,10 @@ def compare(baseline: dict, candidate: dict) -> tuple[str, str]:
 
 def trial_metadata(config: dict) -> dict:
     """Fields every trial's run.json carries so it can be scored without the experiment file."""
-    return {key: config[key] for key in ("task_id", "object", "target", "scene_id", "scorer")}
+    fields = {key: config[key] for key in ("task_id", "object", "target", "scene_id", "scorer")}
+    if config.get("object_offsets") is not None:
+        fields["object_offsets"] = config["object_offsets"]
+    return fields
 
 
 def run_trial(args: argparse.Namespace, parent: Path, config: dict, label: str) -> Path:
@@ -191,6 +206,8 @@ def run_trial(args: argparse.Namespace, parent: Path, config: dict, label: str) 
                "--seconds", str(config["seconds"]), "--scene", config["scene_id"]]
     if config.get("auto_stop_home_seconds"):
         command.extend(("--home-seconds", str(config["auto_stop_home_seconds"])))
+    for offset in config.get("object_offsets") or []:
+        command.extend(("--object-offset", offset["object"], str(offset["dx_m"]), str(offset["dy_m"])))
     if args.viewport_jpeg:
         command.extend(("--viewport-jpeg", str(args.viewport_jpeg)))
     if not args.viewer:
@@ -277,19 +294,30 @@ def print_pair(pair: dict) -> None:
 
 
 def unavailable(config: dict, label: str, outcome: str, reason: str) -> dict:
-    return {"outcome": outcome, "verdict": None if outcome == "not-run" else "failed", "reason": reason,
+    return {"outcome": outcome, "verdict": None if outcome in ("not-run", "invalid-start") else "failed",
+            "reason": reason, "failure_mode": "not-scored",
             "evidence_sim_s": None, "replay": None,
             "actions": config[label]["action_limit"], "prompt": config[label]["prompt"]}
 
 
+def condition_name(config: dict) -> str:
+    layout = layout_from(config.get("object_offsets"))
+    return config["scene_id"] + (" · " + "; ".join(offset.label for offset in layout) if layout else "")
+
+
 def run_pair(folder: Path, config: dict, trial_runner: TrialRunner,
-             stopped: Callable[[], bool] = lambda: False) -> dict:
+             stopped: Callable[[], bool] = lambda: False, preflight: Preflight | None = None) -> dict:
     results = []
+    conflict = preflight(config) if preflight is not None and config.get("object_offsets") else None
     for label in trial_labels(config):
+        if conflict:
+            results.append(unavailable(config, label, "invalid-start",
+                                       f"Not run: {conflict}. No Dream-1 request was made."))
+            continue
         if stopped():
             results.append(unavailable(config, label, "not-run", "The experiment was stopped before this trial."))
             continue
-        print(f"Trial: {config['scene_id']} · {label}", flush=True)
+        print(f"Trial: {condition_name(config)} · {label}", flush=True)
         try:
             result = assess(trial_runner(folder, config, label))
         except (OSError, ValueError, KeyError, RuntimeError) as error:
@@ -303,7 +331,8 @@ def run_pair(folder: Path, config: dict, trial_runner: TrialRunner,
 def summarize(pairs: list[dict]) -> dict:
     if not any("candidate" in pair for pair in pairs):  # single runs: count passes, decide nothing
         passed = sum(pair["baseline"]["outcome"] == "success" for pair in pairs)
-        return {"decision": "single-run", "reason": f"Passed in {passed} of {len(pairs)} scenes.",
+        noun = "layouts" if any("object_offsets" in pair for pair in pairs) else "scenes"
+        return {"decision": "single-run", "reason": f"Passed in {passed} of {len(pairs)} {noun}.",
                 "planned_runs": len(pairs), "passes": {"baseline": passed}}
     valid = [pair for pair in pairs if pair["decision"] != "insufficient-evidence"]
     wins = sum(pair["baseline"]["outcome"] == "task-failure" and pair["candidate"]["outcome"] == "success"
@@ -313,35 +342,73 @@ def summarize(pairs: list[dict]) -> dict:
     counts = {label: sum(pair[label]["outcome"] == "success" for pair in valid)
               for label in ("baseline", "candidate")}
     if len(valid) != len(pairs):
-        decision, reason = "insufficient-evidence", "At least one scene did not produce a valid matched pair."
+        decision, reason = "insufficient-evidence", "At least one condition did not produce a valid matched pair."
     elif regressions:
-        decision, reason = "keep-baseline", "Candidate regressed on at least one tested scene."
+        decision, reason = "keep-baseline", "Candidate regressed on at least one tested condition."
     elif wins:
         decision, reason = "retest-candidate", "Candidate gained at least one pass without a detected regression. Repeat before adopting."
     else:
-        decision, reason = "keep-baseline", "The task outcomes tied across the tested scenes."
+        decision, reason = "keep-baseline", "The task outcomes tied across the tested conditions."
     return {"decision": decision, "reason": reason, "valid_pairs": len(valid),
             "planned_pairs": len(pairs), "passes": counts}
 
 
+def conditions(config: dict, preflight: Preflight | None = None) -> tuple[list[tuple[str, dict]], dict]:
+    """Every (folder, condition config) an experiment runs: each scene, times each random layout, and
+    the layouts drawn per scene with the draws preflight rejected. A layout moves every movable object."""
+    scene_ids = config.get("scene_ids") or [config["scene_id"]]
+    spec = config.get("random_starts")
+    objects = load_inventory().objects if spec else ()
+    result, sampling = [], {}
+    for scene_id in scene_ids:
+        base = {**config, "scene_id": scene_id}
+        if not spec:
+            result.append((scene_id, base))
+            continue
+        check = (lambda layout, base=base: preflight({**base, "object_offsets": layout_dicts(layout)})) if preflight else None
+        layouts, rejected = sample_layouts(spec, objects, check)
+        sampling[scene_id] = {"objects": list(objects), "accepted": [layout_dicts(layout) for layout in layouts],
+                              "rejected": rejected}
+        for index, layout in enumerate(layouts, 1):
+            name = f"start-{index}"
+            folder = name if len(scene_ids) == 1 else f"{scene_id}/{name}"
+            result.append((folder, {**base, "start": index, "object_offsets": layout_dicts(layout)}))
+    return result, sampling
+
+
 def run_experiment(config: dict, output: Path, trial_runner: TrialRunner,
-                   stopped: Callable[[], bool] = lambda: False) -> Path:
-    """Run every scene's baseline/candidate pair (or single run), write comparison.json, and return its path."""
+                   stopped: Callable[[], bool] = lambda: False, preflight: Preflight | None = None) -> Path:
+    """Run every condition's baseline/candidate pair (or single run), write comparison.json, and return its path.
+
+    A condition is a scene, or a scene with the judged object moved. preflight checks a moved object's
+    start before any Dream-1 request; a rejected start is recorded as invalid-start."""
+    planned, sampling = conditions(config, preflight)  # before any folder or request: may raise
     output.mkdir(parents=True)
     (output / "experiment.json").write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
-    scene_ids = config.get("scene_ids") or [config["scene_id"]]
-    if len(scene_ids) == 1:
-        report = run_pair(output, {**config, "scene_id": scene_ids[0]}, trial_runner, stopped)
+    for scene_id, drawn in sampling.items():
+        if drawn["rejected"]:
+            print(f"{scene_id}: redrew {len(drawn['rejected'])} layout(s) that overlapped another body.", flush=True)
+    if len(planned) == 1 and "object_offsets" not in planned[0][1]:
+        report = run_pair(output, planned[0][1], trial_runner, stopped, preflight)
     else:
         pairs = []
-        for scene_id in scene_ids:
-            print(f"\nScene: {scene_id}", flush=True)
-            scene_folder = output / scene_id
-            scene_folder.mkdir()
-            pair = run_pair(scene_folder, {**config, "scene_id": scene_id}, trial_runner, stopped)
-            pairs.append({"scene_id": scene_id, **pair})
+        for folder, condition in planned:
+            print(f"\nCondition: {condition_name(condition)}", flush=True)
+            condition_folder = output / folder
+            condition_folder.mkdir(parents=True)
+            pair = run_pair(condition_folder, condition, trial_runner, stopped, preflight)
+            entry = {"scene_id": condition["scene_id"], "folder": folder}
+            if "object_offsets" in condition:
+                entry.update(start=condition["start"], object_offsets=condition["object_offsets"])
+            pairs.append({**entry, **pair})
         report = {**summarize(pairs), "scenes": pairs}
+        if config.get("random_starts"):
+            report["generalization"] = {**generalization(pairs), "random_starts": config["random_starts"],
+                                        "sampling": sampling}
         print(f"\n{report['decision']}: {report['reason']}")
+    pairs = report.get("scenes", [report])
+    report["failure_modes"] = mode_distribution(pairs)
+    report["safety"] = safety_summary(pairs)
     if stopped():
         report["stopped"] = True
         report["reason"] = "Stopped by the operator. " + report["reason"]
@@ -352,6 +419,38 @@ def run_experiment(config: dict, output: Path, trial_runner: TrialRunner,
     return path
 
 
+class OfflinePreflight:
+    """Check moved-object starts in a local, unrendered copy of the scene (no Dream-1 call)."""
+
+    def __init__(self) -> None:
+        self.env = None
+
+    def __call__(self, config: dict) -> str | None:
+        if self.env is None:
+            from dreamlabs.trial_recorder import load_upstream, recording_env
+
+            _, yam_env = load_upstream()
+            self.env = recording_env(yam_env.YamEnv)()
+        self.env.scene = SCENES[config["scene_id"]]
+        self.env.layout = layout_from(config.get("object_offsets"))
+        self.env.reset()
+        return self.env.start_conflict()
+
+    def close(self) -> None:
+        if self.env is not None:
+            self.env.close()
+
+
+def random_starts_option(args: argparse.Namespace) -> dict:
+    if args.random_starts is None:
+        return {}
+    import secrets
+
+    return {"random_starts": {
+        "count": args.random_starts, "max_offset_m": DEFAULT_OFFSET_M if args.max_offset is None else args.max_offset,
+        "seed": secrets.randbelow(MAX_SEED + 1) if args.seed is None else args.seed}}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--existing", type=Path, nargs=2, metavar=("BASELINE", "CANDIDATE"),
@@ -359,6 +458,11 @@ def main() -> None:
     parser.add_argument("--run", action="store_true", help="Record two fresh Dream-1 runs (uses API credits)")
     parser.add_argument("--config", type=Path, help="Run the experiment exported from the Web workbench")
     parser.add_argument("--scene", action="append", choices=tuple(SCENES), help="Scene for --run. Repeat to compare both layouts.")
+    parser.add_argument("--random-starts", type=int, metavar="N",
+                        help="For --run: N random layouts (every movable object moved), for a generalization table")
+    parser.add_argument("--max-offset", type=float, metavar="M",
+                        help=f"Random start range: ±M metres along world x and y (default {DEFAULT_OFFSET_M:g})")
+    parser.add_argument("--seed", type=int, help="Random start seed (default: a new one, saved in the report)")
     parser.add_argument("--prompt", help=f"Prompt for --run (default: {TASK!r}); it decides the judged task")
     parser.add_argument("--model")
     parser.add_argument("--seconds", type=float)
@@ -376,16 +480,18 @@ def main() -> None:
     if args.yolo and (reason := yolo_unavailable()):
         parser.error(f"{reason} Install it or run without --yolo.")
     overrides = (args.scene, args.prompt, args.model, args.seconds, args.baseline_actions,
-                 args.candidate_actions, args.home_seconds)
+                 args.candidate_actions, args.home_seconds, args.random_starts, args.max_offset, args.seed)
     config = None
     if args.config:
         if any(value is not None for value in overrides):
-            parser.error("Put scene, prompt, model, time, action and home limits in the JSON when using --config.")
+            parser.error("Put scene, random starts, prompt, model, time, action and home limits in the JSON when using --config.")
         try:
             config = load_config(args.config)
         except (OSError, ValueError) as error:
             parser.error(str(error))
     elif args.run:
+        if args.random_starts is None and (args.max_offset is not None or args.seed is not None):
+            parser.error("--max-offset and --seed need --random-starts.")
         baseline_actions = 48 if args.baseline_actions is None else args.baseline_actions
         candidate_actions = 24 if args.candidate_actions is None else args.candidate_actions
         seconds = 120 if args.seconds is None else args.seconds
@@ -401,13 +507,20 @@ def main() -> None:
                 "comparison_variable": "action_limit",
                 "baseline": {"prompt": prompt, "action_limit": baseline_actions},
                 "candidate": {"prompt": prompt, "action_limit": candidate_actions},
+                **random_starts_option(args),
             })
         except ValueError as error:
             parser.error(str(error))
 
     output = (args.output_dir / f"comparison-{uuid4().hex[:12]}").resolve()
     if config is not None:
-        run_experiment(config, output, partial(run_trial, args))
+        preflight = OfflinePreflight()
+        try:
+            run_experiment(config, output, partial(run_trial, args), preflight=preflight)
+        except ValueError as error:  # e.g. no usable random starts; nothing was run
+            parser.error(str(error))
+        finally:
+            preflight.close()
         return
     output.mkdir(parents=True)
     report = pair_report(*map(assess, args.existing))

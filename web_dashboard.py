@@ -12,6 +12,9 @@ from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from compare_replays import validate_config
 from dreamlabs.replay_page import replay_html
+from dreamlabs.failure_modes import LABELS as MODE_LABELS, MODES, failure_mode, mode_distribution
+from dreamlabs.perturbation import layout_from
+from dreamlabs.safety import RULES as SAFETY_RULES, safety_summary
 from dreamlabs.review_client import ReviewRenderer, ReviewUnavailable
 from dreamlabs.scoring import verdict as judge_verdict
 from dreamlabs.task_parser import GENERIC_NOTE
@@ -24,7 +27,8 @@ ARTIFACTS = {"replay.html", "replay-yolo.html", "replay-detections.html", "video
 # Verdicts from dreambench_bk/judge_run.py; the outcome explains how the scorer got there.
 OUTCOMES = {"success": "Placed", "task-failure": "Task failure", "invalid-run": "Invalid run",
             "run-error": "Run error", "unsupported-task": "Unsupported task",
-            "insufficient-evidence": "Insufficient evidence", "not-run": "Not run"}
+            "insufficient-evidence": "Insufficient evidence", "not-run": "Not run",
+            "invalid-start": "Invalid start"}
 STOP_REASONS = {"finished": "Time limit", "home": "Arms back home", "operator": "Stopped from the page",
                 "error": "Error", "interrupted": "Interrupted"}
 DECISIONS = {"keep-baseline": "Keep baseline", "retest-candidate": "Retest candidate", "single-run": "Single run",
@@ -42,8 +46,18 @@ aside small{display:block;color:var(--muted);font-size:.85rem}
 .scene{margin-top:1.55rem}.scene h3{margin:.2rem 0 .7rem}.cards{display:grid;grid-template-columns:1fr 1fr;gap:1rem}.cards.single{grid-template-columns:minmax(0,40rem)}
 .head{display:flex;gap:.6rem;align-items:center;justify-content:space-between;flex-wrap:wrap}
 .head h2{margin:0}strong.pill{font-size:.88rem;background:#293449;border-radius:2rem;padding:.22rem .65rem}
-strong.successed{background:#16463a;color:#adf6dc}strong.failed{background:#4a2933;color:#ffc5d0}
-strong.timeout-stopped{background:#4a3d1c;color:#ffe1a3}
+strong.successed{background:#16463a;color:#adf6dc}
+.generalization{margin-bottom:1rem}.generalization h2{margin:0 0 .3rem;font-size:1.2rem}
+.generalization table{border-collapse:collapse;margin-top:.8rem;width:100%}
+.generalization th,.generalization td{border-bottom:1px solid var(--line);padding:.45rem .6rem;text-align:left}
+.generalization tfoot td{font-weight:600}.generalization a{text-decoration:none}
+.generalization th small,.generalization td small{display:block;color:var(--muted);font-weight:400;font-size:.82rem}
+.safety{display:inline-block;border-radius:.35rem;padding:0 .35rem;background:#293449;font-size:.85rem}
+.safety.pass{background:#16463a;color:#adf6dc}.safety.review{background:#4a3d1c;color:#ffe1a3}
+.safety.block{background:#4a2933;color:#ffc5d0}.muted{color:var(--muted)}tr.quiet td{color:var(--muted)}.scroll{overflow-x:auto}
+.generalization td.num{font-variant-numeric:tabular-nums;white-space:nowrap}.generalization td.judged{color:var(--accent)}
+.cell{display:inline-block;min-width:1.6rem;border-radius:.35rem;padding:.1rem .35rem;margin:.05rem;background:#293449}
+.cell.successed{background:#16463a;color:#adf6dc}.cell.failed{background:#4a2933;color:#ffc5d0}strong.failed{background:#4a2933;color:#ffc5d0}
 .what{margin-top:.8rem;padding:.6rem .75rem;border-radius:.5rem;background:#0f1824;color:#d3e5f6}
 dl{margin:1rem 0;display:grid;gap:.5rem}dl div{display:flex;justify-content:space-between;gap:.75rem;border-bottom:1px solid var(--line);padding-bottom:.45rem}
 dt{color:var(--muted)}dd{margin:0;font-variant-numeric:tabular-nums;text-align:right}
@@ -118,9 +132,11 @@ def is_number(item: object) -> bool:
 
 def trial_verdict(trial: dict) -> str | None:
     """The trial's verdict; older reports without one are judged from their outcome."""
-    if trial.get("outcome") == "not-run":
+    if trial.get("outcome") in ("not-run", "invalid-start"):
         return None
     stored = trial.get("verdict")
+    if stored == "timeout stopped":  # older reports: a run that did not succeed is failed, however it ended
+        return "failed"
     return stored if isinstance(stored, str) else judge_verdict(trial.get("outcome"), trial.get("stop_reason"))
 
 
@@ -137,6 +153,8 @@ def trial_card(root: Path, path: Path, label: str, trial: dict, folder: str | No
         ("API requests", value(trial.get("reported_api_requests"))),
         ("Wall time", value(trial.get("wall_elapsed_s"), " s")),
         ("Evidence time", value(trial.get("evidence_sim_s"), " s sim")),
+        ("Failure mode", escape(MODE_LABELS[failure_mode(trial)])),
+        ("Real-robot safety", safety_pill(trial)),
     )
     rows = "".join(f"<div><dt>{key}</dt><dd>{metric}</dd></div>" for key, metric in metrics)
     motion = trial.get("motion_quality")
@@ -176,14 +194,222 @@ def trial_card(root: Path, path: Path, label: str, trial: dict, folder: str | No
     what = (f'<p class="what">What happened: {value(diagnostics.get("summary"))}</p>'
             if diagnostics.get("summary") else "")
     note = f'<p class="detail">{escape(GENERIC_NOTE)}</p>' if trial.get("tier") == "generic" else ""
-    pill = verdict or "not run"
+    pill = verdict or ("invalid start" if outcome == "invalid-start" else "not run")
     return (
         f'<article><div class="head"><h2>{label}</h2>'
         f'<strong class="pill {escape(pill.replace(" ", "-"))}">{escape(pill)}</strong></div>'
         f'<p class="detail">{value(trial.get("prompt", trial.get("task")))}</p>'
         f'<dl>{rows}</dl><p class="detail">{value(trial.get("reason"))}</p>{what}{note}'
-        f'{quality}{contact_panel}{link}</article>'
+        f'{quality}{contact_panel}{safety_details(trial, url)}{link}</article>'
     )
+
+
+SAFETY_TEXT = {"pass": "pass", "review": "review", "block": "block", "unavailable": "unavailable"}
+
+
+def safety_level(trial: object) -> str:
+    safety = mapping(trial.get("safety")) if isinstance(trial, dict) else {}
+    level = safety.get("level")
+    return level if level in SAFETY_TEXT else "unavailable"
+
+
+def safety_pill(trial: object) -> str:
+    level = safety_level(trial)
+    return f'<span class="safety {level}">{SAFETY_TEXT[level]}</span>'
+
+
+def time_link(url: str | None, seconds: object) -> str:
+    if not is_number(seconds):
+        return "—"
+    return f'<a href="{escape(url)}?t={value(seconds)}">{value(seconds, " s")}</a>' if url else value(seconds, " s")
+
+
+def safety_details(trial: dict, url: str | None) -> str:
+    """The trial's safety findings, each with its first time linked into the replay."""
+    safety = mapping(trial.get("safety"))
+    if not safety:
+        return ""
+    if safety.get("level") == "unavailable":
+        return f'<div class="motion"><h3>Real-robot safety</h3><p class="detail">{value(safety.get("reason"))}</p></div>'
+    rows = ""
+    for item in safety.get("findings") or []:
+        item = mapping(item)
+        bodies = ", ".join(str(name) for name in item.get("bodies") or [])
+        extra = item.get("detail") or " · ".join(part for part in (
+            f'peak {item["peak_normal_force_n"]:.1f} N' if is_number(item.get("peak_normal_force_n")) else "", bodies) if part)
+        rows += (f'<div><dt><span class="safety {escape(str(item.get("level")))}">{value(item.get("level"))}</span> '
+                 f'{value(item.get("label"))}</dt><dd>{value(item.get("events"))} × · first {time_link(url, item.get("first_sim_s"))}'
+                 f'{" · " + escape(str(extra)) if extra else ""}</dd></div>')
+    speed, step = mapping(safety.get("peak_joint_speed")), mapping(safety.get("max_command_step"))
+    rows += (f'<div><dt>Peak joint speed (info)</dt><dd>{value(speed.get("rad_s"), " rad/s")} · {value(speed.get("joint"))}</dd></div>'
+             f'<div><dt>Largest command step (info)</dt><dd>{value(step.get("max_rad"), " rad")} · {value(step.get("joint"))}</dd></div>')
+    limits = "" if safety.get("joint_limits_checked") else '<p class="detail">Joint limits unavailable: command limits were not checked.</p>'
+    return f'<div class="motion"><h3>Real-robot safety</h3><dl>{rows}</dl>{limits}</div>'
+
+
+def pair_report_path(path: Path, pair: dict) -> Path:
+    """Where a condition's trials sit: its folder (scene, or scene/offset) next to the report."""
+    folder = pair.get("folder", pair.get("scene_id"))
+    if isinstance(folder, str) and folder and all(part not in ("", ".", "..") for part in folder.split("/")):
+        return path.parent / folder / path.name
+    return path
+
+
+def condition_title(pair: dict, scenes: int) -> str:
+    layout = layout_from(pair.get("object_offsets"))
+    if layout is None:
+        return value(pair.get("scene_id"))
+    where = f'{pair.get("scene_id")} · ' if scenes > 1 else ""
+    return escape(f'{where}Random start {pair.get("start", "")}: ' + "; ".join(offset.label for offset in layout))
+
+
+def cell_text(trial: dict) -> str:
+    return trial_verdict(trial) or ("invalid start" if trial.get("outcome") == "invalid-start" else "not run")
+
+
+def verdict_cell(trial: object) -> str:
+    if not isinstance(trial, dict):
+        return "—"
+    text = cell_text(trial)
+    mode = failure_mode(trial)
+    detail = f'<small>{escape(MODE_LABELS[mode])}</small>' if mode not in ("successed", "not-scored") else ""
+    return (f'<span class="cell {escape(text.replace(" ", "-"))}">{escape(text)}</span>{detail}'
+            f'<small>safety {safety_pill(trial)}</small>')
+
+
+def arm_names(pairs: list[dict]) -> dict:
+    arms = [label for label in ("baseline", "candidate") if any(isinstance(pair.get(label), dict) for pair in pairs)]
+    return {label: (label.title() if len(arms) > 1 else "Trials") for label in arms}
+
+
+def failure_mode_panel(pairs: list[dict]) -> str:
+    """How the trials ended, by mode, with the conditions (rows of the table above) in each."""
+    if len(pairs) < 2:
+        return ""
+    distribution = mode_distribution(pairs)
+    names = arm_names(pairs)
+    present = [(key, label, meaning) for key, label, meaning in MODES
+               if any(key in mapping(distribution.get(arm)) for arm in names)]
+    numbered = any(type(pair.get("start")) is int for pair in pairs)
+    rows = ""
+    for key, label, meaning in present:
+        cells = ""
+        for arm in names:
+            entry = mapping(mapping(distribution.get(arm)).get(key))
+            where = ", ".join(f"#{n}" for n in entry.get("conditions") or []) if numbered else ""
+            cells += (f'<td>{value(entry.get("count", 0))}' + (f'<small>{escape(where)}</small>' if where else "") + "</td>")
+        rows += f'<tr><td>{escape(label)}<small>{escape(meaning)}</small></td>{cells}</tr>'
+    head = "".join(f"<th>{name}</th>" for name in names.values())
+    return ('<div class="decision generalization"><h2>Failure modes</h2>'
+            '<p class="detail">Read from simulator ground truth: the judged object\'s contacts and trajectory. '
+            'A mode says what happened, not why the model did it.</p>'
+            f'<div class="scroll"><table><thead><tr><th>Mode</th>{head}</tr></thead><tbody>{rows}</tbody></table></div></div>')
+
+
+def safety_panel(pairs: list[dict]) -> str:
+    """Real-robot readiness: the worst level per arm, and every rule that fired, over all trials."""
+    names = arm_names(pairs)
+    if not names:
+        return ""
+    summary = safety_summary(pairs)
+    numbered = any(type(pair.get("start")) is int for pair in pairs)
+    verdicts = ""
+    for arm, name in names.items():
+        item = mapping(summary.get(arm))
+        counts = mapping(item.get("counts"))
+        tally = " · ".join(f"{value(counts[level])} {level}" for level in ("pass", "review", "block", "unavailable") if level in counts)
+        level = item.get("level") if item.get("level") in SAFETY_TEXT else "unavailable"
+        verdicts += f'<p><strong>{name}:</strong> <span class="safety {level}">{SAFETY_TEXT[level]}</span> <span class="muted">{tally}</span></p>'
+    rows = ""
+    for rule, (level, label) in SAFETY_RULES.items():
+        cells, fired = "", False
+        for arm in names:
+            hits = []
+            for index, pair in enumerate(pairs, 1):
+                trial = pair.get(arm)
+                findings = mapping(mapping(trial).get("safety")).get("findings") if isinstance(trial, dict) else None
+                for finding in findings or []:
+                    if mapping(finding).get("rule") == rule:
+                        hits.append((pair.get("start") if type(pair.get("start")) is int else index, finding))
+            fired = fired or bool(hits)
+            peak = max((f.get("peak_normal_force_n") for _, f in hits if is_number(f.get("peak_normal_force_n"))), default=None)
+            where = ", ".join(f"#{n}" for n, _ in hits) if numbered and len(pairs) > 1 else ""
+            cells += (f'<td>{len(hits)} of {sum(isinstance(p.get(arm), dict) for p in pairs)} trials'
+                      + (f' · peak {value(peak, " N")}' if peak is not None else "")
+                      + (f'<small>{escape(where)}</small>' if where else "") + "</td>")
+        rows += (f'<tr{"" if fired else " class=\"quiet\""}><td><span class="safety {level}">{level}</span> '
+                 f'{escape(label)}</td>{cells}</tr>')
+    head = "".join(f"<th>{name}</th>" for name in names.values())
+    return ('<div class="decision generalization"><h2>Real-robot safety gate</h2>'
+            f'{verdicts}<p class="detail"><b>block</b>: arms hit each other, or Dream-1 commanded a joint target outside the '
+            'URDF limits or a gripper target outside 0–1 (the simulator clamps these; a real driver may not). '
+            '<b>review</b>: an arm hit the table, an object or container, or itself. In this simulator the folded right '
+            'arm\'s link2 and link5 touch, which may be a collision-model artifact. Forces are sampled at 20 Hz and are '
+            'simulated, not calibrated. Joint speed is reported per trial without a threshold: the Dream docs give no YAM '
+            'speed limit.</p>'
+            f'<div class="scroll"><table><thead><tr><th>Rule</th>{head}</tr></thead><tbody>{rows}</tbody></table></div></div>')
+
+
+def generalization_panel(root: Path, path: Path, report: dict) -> str:
+    """One table for the random layouts: each start's offset per object, each arm's verdict, and the
+    replay links in the last column."""
+    pairs = [pair for pair in report.get("scenes", []) if isinstance(pair, dict) and layout_from(pair.get("object_offsets"))]
+    if not pairs:
+        return ""
+    info = mapping(report.get("generalization"))
+    spec = mapping(info.get("random_starts"))
+    judged = mapping(report.get("experiment")).get("object")
+    arms = [label for label in ("baseline", "candidate") if any(label in pair for pair in pairs)]
+    names = {label: (label.title() if len(arms) > 1 else "Result") for label in arms}
+    objects: list[str] = []
+    for pair in pairs:
+        for offset in layout_from(pair["object_offsets"]):
+            if offset.object not in objects:
+                objects.append(offset.object)
+    scenes = len({pair.get("scene_id") for pair in pairs})
+    head = ("<th>#</th>" + ("<th>Scene</th>" if scenes > 1 else "")
+            + "".join(f'<th>{escape(name.replace("_", " "))}{" (judged)" if name == judged else ""}<small>Δx, Δy cm</small></th>'
+                      for name in objects)
+            + "".join(f"<th>{names[label]}</th>" for label in arms) + "<th>Replay</th>")
+    rows = ""
+    for index, pair in enumerate(pairs, 1):
+        moved = {offset.object: offset for offset in layout_from(pair["object_offsets"])}
+        where = pair_report_path(path, pair)
+        links = []
+        for label in arms:
+            trial = pair.get(label)
+            url = replay_url(root, where, trial.get("replay"), trial.get("actions"), label) if isinstance(trial, dict) else None
+            if url:
+                text = "Open run replay" if len(arms) == 1 else f"Open {label} replay"
+                links.append(f'<a href="{escape(url)}">{text}</a>')
+        rows += (f'<tr><td>{value(pair.get("start", index))}</td>'
+                 + (f'<td>{value(pair.get("scene_id"))}</td>' if scenes > 1 else "")
+                 + "".join(f'<td class="num{" judged" if name == judged else ""}">'
+                           f'{escape(moved[name].short) if name in moved else "—"}</td>' for name in objects)
+                 + "".join(f"<td>{verdict_cell(pair.get(label))}</td>" for label in arms)
+                 + f'<td>{"<br>".join(links) or "—"}</td></tr>')
+    totals = mapping(info.get("totals"))
+    foot = ""
+    for label in arms:
+        item = mapping(totals.get(label))
+        counts = [(item.get("passed"), "successed"),
+                  (item["scored"] - item["passed"] if is_number(item.get("scored")) and is_number(item.get("passed"))
+                   else None, "failed")]
+        if is_number(item.get("conditions")) and is_number(item.get("scored")) and item["conditions"] > item["scored"]:
+            counts.append((item["conditions"] - item["scored"], "not run"))
+        foot += "<td>" + "<br>".join(f"{value(count)} {word}" for count, word in counts) + "</td>"
+    redrawn = sum(len(mapping(drawn).get("rejected") or []) for drawn in mapping(info.get("sampling")).values())
+    limit = spec.get("max_offset_m")
+    source = (f'{value(spec.get("count"))} random layouts, each object moved uniformly within ±{value(limit * 100)} cm, '
+              f'seed {value(spec.get("seed"))}' if spec and is_number(limit) else "Random layouts")
+    source += f" · {redrawn} overlapping draw{'s' if redrawn != 1 else ''} redrawn before any request" if redrawn else ""
+    span = 1 + (scenes > 1) + len(objects)
+    return (f'<div class="decision generalization"><h2>Generalization: random object layouts</h2>'
+            f'<p class="detail">{source}. Offsets are from each object\'s default start, in MuJoCo world axes; the bowl '
+            'and plate do not move. Each row is one trial, an observation rather than a success rate. '
+            'The same seed reproduces the same layouts.</p>'
+            f'<div class="scroll"><table><thead><tr>{head}</tr></thead><tbody>{rows}</tbody>'
+            f'<tfoot><tr><td colspan="{span}">Total</td>{foot}<td></td></tr></tfoot></table></div></div>')
 
 
 def dashboard(root: Path, selected: str | None) -> str:
@@ -201,7 +427,9 @@ def dashboard(root: Path, selected: str | None) -> str:
             label = f'{value(first_pair["baseline"].get("actions"))} vs {value(first_pair["candidate"].get("actions"))} steps'
         else:
             label = f'Single run · {value(first_pair["baseline"].get("actions"))} steps'
-        if "scenes" in report:
+        if "generalization" in report:
+            label += f' · {len(report["scenes"])} random layouts'
+        elif "scenes" in report:
             label += f' · {len(report["scenes"])} scenes'
         if mapping(report.get("experiment")).get("comparison_variable") == "prompt":
             label = "Prompt comparison"
@@ -217,7 +445,8 @@ def dashboard(root: Path, selected: str | None) -> str:
         task = value(experiment.get("task_id") or baseline.get("task_id") or baseline.get("task"))
         detail = f'{task} · model {value(experiment.get("model", baseline.get("model")))} · {value(experiment.get("seconds", baseline.get("seconds")), " s")} limit'
         if "scenes" in report and single:
-            detail += f' · {value(mapping(report.get("passes")).get("baseline"))}/{value(report.get("planned_runs"))} scenes passed'
+            detail += (f' · {value(mapping(report.get("passes")).get("baseline"))}/{value(report.get("planned_runs"))} '
+                       + ("layouts" if "generalization" in report else "scenes") + " passed")
         elif "scenes" in report:
             passes = mapping(report.get("passes"))
             detail += (f' · {value(report.get("valid_pairs"))}/{value(report.get("planned_pairs"))} matched pairs'
@@ -229,15 +458,15 @@ def dashboard(root: Path, selected: str | None) -> str:
         content = (
             f'<div class="decision"><h2>{escape(heading)}</h2>'
             f'<p class="detail">{value(report.get("reason"))}</p><p class="detail">{detail}</p></div>'
-        )
+        ) + generalization_panel(root, path, report) + failure_mode_panel(pairs) + safety_panel(pairs)
+        scene_count = len({pair.get("scene_id") for pair in pairs})
         for pair in pairs:
             scene_id = pair.get("scene_id")
             scene_path = path
             if scene_id:
-                # Keep moved recordings resolvable under their scene subdirectory.
-                if isinstance(scene_id, str) and Path(scene_id).name == scene_id and scene_id not in (".", ".."):
-                    scene_path = path.parent / scene_id / path.name
-                content += (f'<div class="scene"><h3>{value(scene_id)}</h3>'
+                # Keep moved recordings resolvable under their condition subdirectory.
+                scene_path = pair_report_path(path, pair)
+                content += (f'<div class="scene"><h3>{condition_title(pair, scene_count)}</h3>'
                             f'<p class="detail">{value(pair.get("reason"))}</p>')
             if "candidate" in pair:
                 content += ('<div class="cards">'

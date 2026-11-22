@@ -20,6 +20,7 @@ from .contact_events import sample_contacts
 from .frame_restore import STATE_SCHEMA, integration_state, model_digest
 from .home_watchdog import HomeWatchdog
 from .replay_page import CAMERAS, write_replay
+from .perturbation import Layout, apply_layout, layout_conflict
 from .scenarios import DEFAULT_SCENE_ID, SCENES, Scene
 from .scene_inventory import discover
 from .scoring import contacts_key
@@ -194,6 +195,7 @@ def recording_env(base: type) -> type:
 
     class RecordingEnv(base):
         scene: Scene = SCENES[DEFAULT_SCENE_ID]
+        layout: Layout | None = None  # random object offsets on top of the scene
         recorder: TrialRecorder | None = None
         viewport: ViewportPublisher | None = None
 
@@ -202,7 +204,15 @@ def recording_env(base: type) -> type:
             if any(self.scene.apple_offset_xyz_m):
                 self.data.joint("apple_free").qpos[:3] += self.scene.apple_offset_xyz_m
                 mujoco.mj_forward(self.model, self.data)
+            if self.layout:
+                apply_layout(self.model, self.data, self.layout)
             return state
+
+        def start_conflict(self) -> str | None:
+            """Why the moved objects' start is unusable, or None. Call right after reset()."""
+            if not self.layout:
+                return None
+            return layout_conflict(self.model, self.data, self.layout)
 
         def step(self, left, right):
             recorder = self.recorder

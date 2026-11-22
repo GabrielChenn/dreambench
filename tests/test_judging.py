@@ -16,7 +16,7 @@ from dreamlabs import scene_inventory
 from dreamlabs.home_watchdog import HomeWatchdog, joint_list
 from dreamlabs.scene_inventory import FALLBACK, Inventory, discover, load_inventory
 from dreamlabs.scoring import (CONTAINERS, FAILED, GENERIC_SCORER, OBJECTS, SUCCESSED, TASK_BY_PAIR, TASKS,
-                               TIMEOUT_STOPPED, contacts_key, diagnose, resolve_task, score, task_id, verdict)
+                               contacts_key, diagnose, resolve_task, score, task_id, verdict)
 from dreamlabs.task_parser import describe, parse_prompt
 
 HAS_SIM = importlib.util.find_spec("dream_examples") is not None and importlib.util.find_spec("mujoco") is not None
@@ -144,11 +144,11 @@ class ScoreTests(unittest.TestCase):
 
 
 class VerdictTests(unittest.TestCase):
-    """dreambench_bk/judge_run.py: successed / failed / timeout stopped."""
+    """successed, or failed however the run ended."""
 
     def test_mapping(self) -> None:
         cases = {("success", "finished"): SUCCESSED, ("success", "home"): SUCCESSED,
-                 ("task-failure", "home"): TIMEOUT_STOPPED, ("task-failure", "finished"): FAILED,
+                 ("task-failure", "home"): FAILED, ("task-failure", "finished"): FAILED,
                  ("task-failure", "operator"): FAILED, ("invalid-run", "error"): FAILED,
                  ("insufficient-evidence", None): FAILED}
         for (outcome, stop), expected in cases.items():
@@ -156,7 +156,7 @@ class VerdictTests(unittest.TestCase):
                 self.assertEqual(verdict(outcome, stop), expected)
 
     def test_words_match_bk(self) -> None:
-        self.assertEqual((SUCCESSED, FAILED, TIMEOUT_STOPPED), ("successed", "failed", "timeout stopped"))
+        self.assertEqual((SUCCESSED, FAILED), ("successed", "failed"))
 
 
 def config(prompt: str, candidate: str | None = None, **extra) -> dict:

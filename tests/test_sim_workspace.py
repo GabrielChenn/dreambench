@@ -73,12 +73,12 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(finished["event"], "experiment_finished", log.getvalue())
         return json.loads(Path(finished["report"]).read_text())
 
-    def test_home_auto_stop_is_timeout_stopped(self) -> None:
+    def test_home_auto_stop_is_failed(self) -> None:
         report = self.run_experiment(threading.Event(), CONFIG)
         for label in ("baseline", "candidate"):
             trial = report[label]
             self.assertEqual((trial["stop_reason"], trial["verdict"], trial["outcome"]),
-                             ("home", "timeout stopped", "task-failure"))
+                             ("home", "failed", "task-failure"))
             self.assertEqual(trial["reported_api_requests"], None)  # stopped before the scripted summary line
             self.assertTrue(trial["home_rule"]["stop"])
             self.assertEqual(trial["diagnostics"]["stage"], "untouched")

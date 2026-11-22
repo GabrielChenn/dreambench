@@ -50,7 +50,7 @@ CALIBRATED, GENERIC = "calibrated", "generic"
 TASK_ID_PATTERN = re.compile(r"^(?P<object>[a-z0-9]+(?:-[a-z0-9]+)*?)-(?P<relation>in|on)-(?P<target>[a-z0-9_-]+)$")
 
 # Judged verdicts, as in dreambench_bk/judge_run.py.
-SUCCESSED, FAILED, TIMEOUT_STOPPED = "successed", "failed", "timeout stopped"
+SUCCESSED, FAILED = "successed", "failed"
 
 
 @dataclass(frozen=True)
@@ -289,13 +289,9 @@ def score_outcome(rows: list[dict], metadata: dict) -> dict:
 
 
 def verdict(outcome: str | None, stop_reason: str | None) -> str:
-    """Map a scored outcome to successed / failed / timeout stopped, as dreambench_bk/judge_run.py does.
+    """Map a scored outcome to successed or failed.
 
-    A run stopped because the arms stayed home is "timeout stopped" unless the object was placed first.
-    Every other run that did not succeed (time limit, task failure, error, operator stop) is "failed".
+    Every run that did not succeed is "failed", however it ended: time limit, arms back home (the home
+    auto-stop), task failure, error or operator stop. How it ended stays in stop_reason.
     """
-    if outcome == "success":
-        return SUCCESSED
-    if stop_reason == "home":
-        return TIMEOUT_STOPPED
-    return FAILED
+    return SUCCESSED if outcome == "success" else FAILED
