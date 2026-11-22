@@ -20,11 +20,11 @@ Open the Web workbench from the repository root:
 
 Visit [the results page](http://127.0.0.1:8765/) or [configure an experiment](http://127.0.0.1:8765/configure). The server starts a persistent, headless Dream YAM Sim and shows its 3D viewport on the configuration page. Viewing reports, downloading configurations, and resetting the scene use no API credits. A clean checkout starts with an empty experiment list.
 
-On the configuration page, write the baseline and candidate prompts and choose what changes between them. The page reads the task from the prompt, in English or Chinese, and shows the scorer it will use. For example, “put orange into the bowl” and “把橙子放进碗里” are both judged as `orange-in-bowl`. When the prompts differ, both must name the same object and destination.
+On the configuration page, write the prompt and set the model, time limit, home auto-stop and action limit. That is a single run. To compare, tick **Compare with a candidate**, then choose what changes (prompt or action limit) and set the candidate. The page reads the task from the prompt, in English or Chinese, and shows the scorer it will use. For example, “put orange into the bowl” and “把橙子放进碗里” are both judged as `orange-in-bowl`. When the prompts differ, both must name the same object and destination.
 
 | Control | Effect |
 | --- | --- |
-| **Run experiment** | After you confirm API usage, runs the baseline and the candidate. Each trial starts from a reset scene. |
+| **Run experiment** | After you confirm API usage, runs the single run, or the baseline and the candidate. Each trial starts from a reset scene. |
 | **Reset** | Restores the scene: objects and arms. Stops a running experiment. |
 | **Reset robot** | Drives the arms home over 2 s and leaves the objects where they are. Stops a running experiment. |
 | **Stop** | Stops the running trial after the current step and saves and judges its recording. The remaining trials are not run. |

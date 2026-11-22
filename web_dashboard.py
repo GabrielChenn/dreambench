@@ -27,7 +27,7 @@ OUTCOMES = {"success": "Placed", "task-failure": "Task failure", "invalid-run": 
             "insufficient-evidence": "Insufficient evidence", "not-run": "Not run"}
 STOP_REASONS = {"finished": "Time limit", "home": "Arms back home", "operator": "Stopped from the page",
                 "error": "Error", "interrupted": "Interrupted"}
-DECISIONS = {"keep-baseline": "Keep baseline", "retest-candidate": "Retest candidate",
+DECISIONS = {"keep-baseline": "Keep baseline", "retest-candidate": "Retest candidate", "single-run": "Single run",
              "insufficient-evidence": "Insufficient evidence"}
 
 CSS = """
@@ -39,7 +39,7 @@ aside a[aria-current=page]{background:#23354a;color:var(--accent)}
 aside small{display:block;color:var(--muted);font-size:.85rem}
 .decision{border-left:4px solid var(--accent);margin-bottom:1rem}
 .decision h2{font-size:1.45rem;margin:0}
-.scene{margin-top:1.55rem}.scene h3{margin:.2rem 0 .7rem}.cards{display:grid;grid-template-columns:1fr 1fr;gap:1rem}
+.scene{margin-top:1.55rem}.scene h3{margin:.2rem 0 .7rem}.cards{display:grid;grid-template-columns:1fr 1fr;gap:1rem}.cards.single{grid-template-columns:minmax(0,40rem)}
 .head{display:flex;gap:.6rem;align-items:center;justify-content:space-between;flex-wrap:wrap}
 .head h2{margin:0}strong.pill{font-size:.88rem;background:#293449;border-radius:2rem;padding:.22rem .65rem}
 strong.successed{background:#16463a;color:#adf6dc}strong.failed{background:#4a2933;color:#ffc5d0}
@@ -93,7 +93,8 @@ def experiments(root: Path) -> list[tuple[Path, dict]]:
             continue
         pairs = data.get("scenes", [data])
         if isinstance(pairs, list) and pairs and all(
-            isinstance(pair, dict) and all(isinstance(pair.get(key), dict) for key in ("baseline", "candidate"))
+            isinstance(pair, dict) and isinstance(pair.get("baseline"), dict)
+            and isinstance(pair.get("candidate", {}), dict)  # single runs have no candidate
             for pair in pairs
         ):
             result.append((path, data))
@@ -123,10 +124,11 @@ def trial_verdict(trial: dict) -> str | None:
     return stored if isinstance(stored, str) else judge_verdict(trial.get("outcome"), trial.get("stop_reason"))
 
 
-def trial_card(root: Path, path: Path, label: str, trial: dict) -> str:
+def trial_card(root: Path, path: Path, label: str, trial: dict, folder: str | None = None) -> str:
+    """One trial's result. folder is the trial's recording folder name when it differs from the label."""
     outcome = str(trial.get("outcome", "Unknown"))
     verdict = trial_verdict(trial)
-    url = replay_url(root, path, trial.get("replay"), trial.get("actions"), label)
+    url = replay_url(root, path, trial.get("replay"), trial.get("actions"), folder or label)
     stop = trial.get("stop_reason")
     metrics = (
         ("Scorer result", escape(OUTCOMES.get(outcome, outcome))),
@@ -195,7 +197,10 @@ def dashboard(root: Path, selected: str | None) -> str:
         name = path.parent.name
         active = ' aria-current="page"' if entry and entry[0] == path else ""
         first_pair = report["scenes"][0] if "scenes" in report else report
-        label = f'{value(first_pair["baseline"].get("actions"))} vs {value(first_pair["candidate"].get("actions"))} steps'
+        if "candidate" in first_pair:
+            label = f'{value(first_pair["baseline"].get("actions"))} vs {value(first_pair["candidate"].get("actions"))} steps'
+        else:
+            label = f'Single run · {value(first_pair["baseline"].get("actions"))} steps'
         if "scenes" in report:
             label += f' · {len(report["scenes"])} scenes'
         if mapping(report.get("experiment")).get("comparison_variable") == "prompt":
@@ -207,16 +212,22 @@ def dashboard(root: Path, selected: str | None) -> str:
         pairs = report.get("scenes", [report])
         baseline = pairs[0]["baseline"]
         decision = str(report.get("decision", "Unknown"))
+        single = not any("candidate" in pair for pair in pairs)
         experiment = mapping(report.get("experiment"))
         task = value(experiment.get("task_id") or baseline.get("task_id") or baseline.get("task"))
         detail = f'{task} · model {value(experiment.get("model", baseline.get("model")))} · {value(experiment.get("seconds", baseline.get("seconds")), " s")} limit'
-        if "scenes" in report:
+        if "scenes" in report and single:
+            detail += f' · {value(mapping(report.get("passes")).get("baseline"))}/{value(report.get("planned_runs"))} scenes passed'
+        elif "scenes" in report:
             passes = mapping(report.get("passes"))
             detail += (f' · {value(report.get("valid_pairs"))}/{value(report.get("planned_pairs"))} matched pairs'
                        f' · Baseline {value(passes.get("baseline"))} passes'
                        f' · Candidate {value(passes.get("candidate"))} passes')
+        heading = DECISIONS.get(decision, decision)
+        if single and "scenes" not in report:
+            heading += ": " + (trial_verdict(baseline) or "not run")
         content = (
-            f'<div class="decision"><h2>{escape(DECISIONS.get(decision, decision))}</h2>'
+            f'<div class="decision"><h2>{escape(heading)}</h2>'
             f'<p class="detail">{value(report.get("reason"))}</p><p class="detail">{detail}</p></div>'
         )
         for pair in pairs:
@@ -228,9 +239,13 @@ def dashboard(root: Path, selected: str | None) -> str:
                     scene_path = path.parent / scene_id / path.name
                 content += (f'<div class="scene"><h3>{value(scene_id)}</h3>'
                             f'<p class="detail">{value(pair.get("reason"))}</p>')
-            content += ('<div class="cards">'
-                        + trial_card(root, scene_path, "Baseline", pair["baseline"])
-                        + trial_card(root, scene_path, "Candidate", pair["candidate"]) + '</div>')
+            if "candidate" in pair:
+                content += ('<div class="cards">'
+                            + trial_card(root, scene_path, "Baseline", pair["baseline"])
+                            + trial_card(root, scene_path, "Candidate", pair["candidate"]) + '</div>')
+            else:  # a single run is recorded in the baseline folder
+                content += ('<div class="cards single">'
+                            + trial_card(root, scene_path, "Run", pair["baseline"], folder="baseline") + '</div>')
             if scene_id:
                 content += '</div>'
     else:

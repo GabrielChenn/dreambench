@@ -51,8 +51,8 @@ def resolve_config_task(config: dict) -> dict:
         if spec is None:
             raise ValueError(f"Cannot read task {goal_id!r}. Use <object>-in-<support> or <object>-on-<support>.")
     else:
-        specs = [parse_prompt(config[name]["prompt"]) for name in ("baseline", "candidate")]
-        if specs[0].task_id != specs[1].task_id:
+        specs = [parse_prompt(config[name]["prompt"]) for name in trial_labels(config)]
+        if len(specs) > 1 and specs[0].task_id != specs[1].task_id:
             raise ValueError(f"Both prompts must ask for the same task: {specs[0].task_id} vs {specs[1].task_id}.")
         spec = specs[0]
     scene = load_inventory()
@@ -65,7 +65,14 @@ def resolve_config_task(config: dict) -> dict:
             "tier": spec.tier, "success_condition": spec.success_condition}
 
 
+def trial_labels(config: dict) -> tuple[str, ...]:
+    """The trials an experiment records: a baseline/candidate pair, or the baseline alone for a single run."""
+    return ("baseline", "candidate") if config.get("comparison_variable") is not None else ("baseline",)
+
+
 def validate_config(config: object) -> dict:
+    """Check an experiment: a comparison (comparison_variable, baseline, candidate) or a single run
+    (no comparison_variable, baseline only)."""
     if not isinstance(config, dict) or type(config.get("schema_version")) is not int or config["schema_version"] != 1:
         raise ValueError("Use a schema version 1 experiment configuration from the Web workbench.")
     if "scene_id" in config and "scene_ids" in config:
@@ -78,8 +85,12 @@ def validate_config(config: object) -> dict:
             or len(scene_ids) != len(set(scene_ids))):
         raise ValueError("Choose distinct registered scenes.")
     variable = config.get("comparison_variable")
-    if variable not in ("prompt", "action_limit"):
-        raise ValueError("Choose prompt or action_limit as the comparison variable.")
+    if variable not in (None, "prompt", "action_limit"):
+        raise ValueError("Choose prompt or action_limit as the comparison variable, or none for a single run.")
+    if variable is None:
+        if "candidate" in config:
+            raise ValueError("A single run has no candidate. Choose what to compare, or remove the candidate.")
+        config["comparison_variable"] = None
     model, seconds = config.get("model"), config.get("seconds")
     if not isinstance(model, str) or not model.strip() or any(char.isspace() for char in model) or len(model) > 100:
         raise ValueError("Use a nonempty model identifier without spaces.")
@@ -89,7 +100,7 @@ def validate_config(config: object) -> dict:
     if home is not None and (type(home) not in (int, float) or not (home == 0 or 0.5 <= home <= MAX_HOME_SECONDS)):
         raise ValueError(f"Use 0 (off) or 0.5 to {MAX_HOME_SECONDS:g} seconds for the home auto-stop.")
     config["auto_stop_home_seconds"] = home or None
-    for name in ("baseline", "candidate"):
+    for name in trial_labels(config):
         run = config.get(name)
         if not isinstance(run, dict):
             raise ValueError(f"Missing {name} configuration.")
@@ -101,10 +112,11 @@ def validate_config(config: object) -> dict:
         if type(limit) is not int or not 1 <= limit <= 48:
             raise ValueError(f"Use an integer {name} action limit from 1 to 48.")
         config[name] = {"prompt": prompt.strip(), "action_limit": limit}
-    changed = [field for field in ("prompt", "action_limit")
-               if config["baseline"][field] != config["candidate"][field]]
-    if changed != [variable]:
-        raise ValueError(f"Exactly one field must change: {variable}.")
+    if variable is not None:
+        changed = [field for field in ("prompt", "action_limit")
+                   if config["baseline"][field] != config["candidate"][field]]
+        if changed != [variable]:
+            raise ValueError(f"Exactly one field must change: {variable}.")
     config.update(resolve_config_task(config))
     return config
 
@@ -242,17 +254,26 @@ def pair_report(baseline: dict, candidate: dict) -> dict:
     return {"decision": decision, "reason": reason, "baseline": baseline, "candidate": candidate}
 
 
+def single_report(result: dict) -> dict:
+    """Report for a run without a candidate: its own verdict, no comparison decision."""
+    return {"decision": "single-run", "reason": result["reason"], "baseline": result}
+
+
 def print_pair(pair: dict) -> None:
     for label in ("baseline", "candidate"):
+        if label not in pair:
+            continue
         result = pair[label]
         evidence = result["evidence_sim_s"]
         timestamp = f" at {evidence:.2f} s" if evidence is not None else ""
-        print(f"{label.title()}: {result.get('verdict') or result['outcome']}{timestamp}. {result['reason']}")
+        title = label.title() if "candidate" in pair else "Run"
+        print(f"{title}: {result.get('verdict') or result['outcome']}{timestamp}. {result['reason']}")
         if result.get("diagnostics"):
             print(f"  What happened: {result['diagnostics']['summary']}")
         if result["replay"]:
             print(f"  Replay: {result['replay']}")
-    print(f"{pair['decision']}: {pair['reason']}")
+    if "candidate" in pair:
+        print(f"{pair['decision']}: {pair['reason']}")
 
 
 def unavailable(config: dict, label: str, outcome: str, reason: str) -> dict:
@@ -264,7 +285,7 @@ def unavailable(config: dict, label: str, outcome: str, reason: str) -> dict:
 def run_pair(folder: Path, config: dict, trial_runner: TrialRunner,
              stopped: Callable[[], bool] = lambda: False) -> dict:
     results = []
-    for label in ("baseline", "candidate"):
+    for label in trial_labels(config):
         if stopped():
             results.append(unavailable(config, label, "not-run", "The experiment was stopped before this trial."))
             continue
@@ -274,12 +295,16 @@ def run_pair(folder: Path, config: dict, trial_runner: TrialRunner,
         except (OSError, ValueError, KeyError, RuntimeError) as error:
             result = unavailable(config, label, "run-error", str(error) or type(error).__name__)
         results.append(result)
-    pair = pair_report(*results)
+    pair = pair_report(*results) if len(results) == 2 else single_report(results[0])
     print_pair(pair)
     return pair
 
 
 def summarize(pairs: list[dict]) -> dict:
+    if not any("candidate" in pair for pair in pairs):  # single runs: count passes, decide nothing
+        passed = sum(pair["baseline"]["outcome"] == "success" for pair in pairs)
+        return {"decision": "single-run", "reason": f"Passed in {passed} of {len(pairs)} scenes.",
+                "planned_runs": len(pairs), "passes": {"baseline": passed}}
     valid = [pair for pair in pairs if pair["decision"] != "insufficient-evidence"]
     wins = sum(pair["baseline"]["outcome"] == "task-failure" and pair["candidate"]["outcome"] == "success"
                for pair in valid)
@@ -301,7 +326,7 @@ def summarize(pairs: list[dict]) -> dict:
 
 def run_experiment(config: dict, output: Path, trial_runner: TrialRunner,
                    stopped: Callable[[], bool] = lambda: False) -> Path:
-    """Run every scene's baseline/candidate pair, write comparison.json, and return its path."""
+    """Run every scene's baseline/candidate pair (or single run), write comparison.json, and return its path."""
     output.mkdir(parents=True)
     (output / "experiment.json").write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
     scene_ids = config.get("scene_ids") or [config["scene_id"]]

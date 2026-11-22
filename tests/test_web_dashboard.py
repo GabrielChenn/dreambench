@@ -119,6 +119,23 @@ class DashboardRobustnessTests(unittest.TestCase):
         self.assertIn("Arm–table collisions", page)
 
 
+class SingleRunDisplayTests(unittest.TestCase):
+    def test_single_run_report(self) -> None:
+        trial = {"outcome": "success", "verdict": "successed", "actions": 48, "reason": "Placed.",
+                 "prompt": "put orange into the bowl"}
+        report = {"decision": "single-run", "reason": "Placed.", "baseline": trial,
+                  "experiment": {"comparison_variable": None, "model": "beta", "seconds": 60}}
+        with TemporaryDirectory() as directory:
+            folder = Path(directory) / "comparison-abc123"
+            folder.mkdir()
+            (folder / "comparison.json").write_text(json.dumps(report), encoding="utf-8")
+            page = dashboard(Path(directory), None)
+        self.assertIn("Single run: successed", page)
+        self.assertIn("Single run · 48 steps", page)
+        self.assertIn("<h2>Run</h2>", page)
+        self.assertNotIn("Candidate", page)
+
+
 class VerdictDisplayTests(unittest.TestCase):
     def render(self, baseline: dict, candidate: dict) -> str:
         report = {"decision": "keep-baseline", "reason": "r", "baseline": baseline, "candidate": candidate}

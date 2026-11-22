@@ -33,12 +33,15 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;padding:.8rem;border-radius:.45r
 .task{border-left:3px solid var(--accent);padding:.35rem .7rem;margin:0 0 1rem;background:#0f1824;border-radius:.35rem}
 .task[data-error=true]{border-color:#ffb2b2}
 .hint{font-size:.85rem;color:var(--muted);margin-top:.2rem}
+.optional input[type=checkbox]{display:inline;width:auto;margin:0 .45rem 0 0}
+.comparison{border-top:1px solid var(--line);padding-top:.9rem}
+[hidden]{display:none!important}
 @media(max-width:760px){.layout,.row,.row3{grid-template-columns:1fr}}
 </style>
 <header><nav aria-label="Workbench"><strong>DreamBench</strong><a href="/">Results</a><a href="/configure" aria-current="page">Configure</a></nav></header>
 <main>
-<h1>Configure a regression</h1>
-<p class="muted">Write the Dream-1 prompts and compare one prompt or execution setting. The judged task is read from the prompt.</p>
+<h1>Configure an experiment</h1>
+<p class="muted">Run one Dream-1 prompt, or optionally compare a candidate prompt or action limit against it. The judged task is read from the prompt.</p>
 <section id="viewport-panel" class="viewport-panel" aria-labelledby="viewport-title">
 <h2 id="viewport-title">MuJoCo viewport</h2>
 <p id="sim-status" class="status" role="status">Checking the simulator…</p>
@@ -48,28 +51,31 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;padding:.8rem;border-radius:.45r
 <section aria-label="Experiment configuration">
 <form id="experiment">
 <p id="task" class="task" role="status" aria-live="polite">Reading the task from the prompt…</p>
-<label>Compare
-<select id="variable"><option value="action_limit">Actions executed per response</option><option value="prompt">Dream-1 prompt</option></select></label>
+<label><span class="baseline-word" hidden>Baseline prompt</span><span class="single-word">Prompt</span><textarea id="prompt-a" maxlength="500" required>put apple into the bowl</textarea></label>
 <div class="row3">
 <label>Model identifier<input id="model" value="beta" maxlength="100" required></label>
 <label>Time limit per run (s)<input id="seconds" type="number" min="1" max="600" value="120" required></label>
 <label>Stop after arms home (s)<input id="home" type="number" min="0" max="120" step="0.5" value="5" required>
 <span class="hint">0 turns the auto-stop off.</span></label>
 </div>
+<div class="row3">
+<label><span class="baseline-word" hidden>Baseline action limit</span><span class="single-word">Action limit</span><input id="actions-a" type="number" min="1" max="48" value="48" required>
+<span class="hint">Actions executed per Dream-1 response (1–48).</span></label>
+</div>
+<label class="optional"><input id="compare" type="checkbox">Compare with a candidate <span class="muted">(optional)</span></label>
+<fieldset id="compare-fields" class="comparison" disabled hidden>
+<legend>Candidate</legend>
+<label>Compare
+<select id="variable"><option value="action_limit">Actions executed per response</option><option value="prompt">Dream-1 prompt</option></select></label>
 <div class="row">
-<fieldset><legend>Baseline</legend>
-<label>Baseline prompt<textarea id="prompt-a" maxlength="500" required>put apple into the bowl</textarea></label>
-<label>Baseline action limit<input id="actions-a" type="number" min="1" max="48" value="48" required></label>
-</fieldset>
-<fieldset><legend>Candidate</legend>
 <label>Candidate prompt<textarea id="prompt-b" maxlength="500" required>put apple into the bowl</textarea></label>
 <label>Candidate action limit<input id="actions-b" type="number" min="1" max="48" value="24" required></label>
-</fieldset>
 </div>
+</fieldset>
 </form>
 </section>
 <section aria-label="Configuration preview">
-<h2>Change preview</h2>
+<h2>Configuration preview</h2>
 <p id="status" class="status" role="status" aria-live="polite"></p>
 <pre id="preview"></pre>
 <button id="download" type="button" class="secondary">Download config</button>
@@ -104,6 +110,7 @@ const promptA = get('prompt-a');
 const promptB = get('prompt-b');
 const actionsA = get('actions-a');
 const actionsB = get('actions-b');
+const compare = get('compare');
 let snapshot = null;
 let resolved = null;       // the server's reading of the current snapshot: {task, note} or {error}
 let resolveTimer = null;
@@ -168,7 +175,13 @@ async function resolveTask() {
 }
 
 function update() {
-  const comparesPrompt = variable.value === 'prompt';
+  // Without the comparison the experiment is a single run: the baseline fields alone.
+  const comparing = compare.checked;
+  get('compare-fields').hidden = !comparing;
+  get('compare-fields').disabled = !comparing;  // keeps its required fields out of form validation
+  for (const word of document.querySelectorAll('.baseline-word')) word.hidden = !comparing;
+  for (const word of document.querySelectorAll('.single-word')) word.hidden = comparing;
+  const comparesPrompt = comparing && variable.value === 'prompt';
   promptB.readOnly = !comparesPrompt;
   actionsB.readOnly = comparesPrompt;
   if (!comparesPrompt) promptB.value = promptA.value;
@@ -177,28 +190,28 @@ function update() {
   const b = {prompt: promptB.value.trim(), action_limit: actionsB.valueAsNumber};
   const model = get('model').value.trim();
   const home = get('home').valueAsNumber;
-  const same = a[variable.value] === b[variable.value];
   let error = '';
-  if (!form.checkValidity() || !a.prompt || !b.prompt || !model || /\s/.test(model)) {
-    error = 'Complete both configurations and use valid numeric limits.';
+  if (!form.checkValidity() || !a.prompt || (comparing && !b.prompt) || !model || /\s/.test(model)) {
+    error = comparing ? 'Complete both configurations and use valid numeric limits.'
+      : 'Complete the configuration and use valid numeric limits.';
   } else if (home !== 0 && home < 0.5) {
     error = 'Use 0 (off) or at least 0.5 s for the auto-stop.';
-  } else if (same) {
+  } else if (comparing && a[variable.value] === b[variable.value]) {
     error = comparesPrompt ? 'Enter two different prompts.' : 'Enter two different action limits.';
   }
-  const next = error ? null : {
-    schema_version: 1, model, seconds: get('seconds').valueAsNumber,
-    auto_stop_home_seconds: home, comparison_variable: variable.value,
-    baseline: a, candidate: b,
-  };
+  const common = {schema_version: 1, model, seconds: get('seconds').valueAsNumber, auto_stop_home_seconds: home};
+  const next = error ? null : comparing
+    ? {...common, comparison_variable: variable.value, baseline: a, candidate: b}
+    : {...common, baseline: a};
   if (JSON.stringify(next) !== JSON.stringify(snapshot)) {
     snapshot = next;
     resolved = null;
     clearTimeout(resolveTimer);
     resolveTimer = setTimeout(resolveTask, 300);
   }
-  get('status').textContent = error || (comparesPrompt ? 'Prompt changed · action limit fixed' :
-    'Action limit: ' + a.action_limit + ' → ' + b.action_limit + ' · prompt fixed');
+  get('status').textContent = error || (!comparing ? 'Single run · action limit ' + a.action_limit
+    : comparesPrompt ? 'Prompt changed · action limit fixed'
+    : 'Action limit: ' + a.action_limit + ' → ' + b.action_limit + ' · prompt fixed');
   get('status').dataset.error = String(Boolean(error));
   get('preview').textContent = snapshot ? JSON.stringify(snapshot, null, 2) : '';
   get('download').disabled = !snapshot;
@@ -206,6 +219,13 @@ function update() {
   setButtons();
 }
 
+compare.addEventListener('change', () => {
+  if (compare.checked) {  // restore the candidate's own values when the comparison comes back
+    if (variable.value === 'prompt') promptB.value = candidatePrompt;
+    else actionsB.value = candidateActions;
+  }
+  update();
+});
 variable.addEventListener('change', () => {
   if (variable.value === 'prompt') promptB.value = candidatePrompt;
   else actionsB.value = candidateActions;

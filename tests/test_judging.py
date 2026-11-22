@@ -1,6 +1,8 @@
 """Judging ported from dreambench_bk: scorers, diagnostics, scene discovery, prompts, home rule. No API calls."""
 
+from contextlib import redirect_stdout
 import importlib.util
+import io
 import json
 from pathlib import Path
 import sys
@@ -189,6 +191,37 @@ class ConfigTests(unittest.TestCase):
                 data = config(spec.prompt, task_id=spec.task_id, scorer=spec.scorer,
                               success_condition=spec.success_condition, scene_id="yam-tabletop-default")
                 self.assertEqual(self.load(data)["task_id"], spec.task_id)
+
+    def test_single_run_needs_only_the_baseline(self) -> None:
+        single = {"schema_version": 1, "model": "beta", "seconds": 60,
+                  "baseline": {"prompt": "put orange into the bowl", "action_limit": 48}}
+        loaded = validate_config(json.loads(json.dumps(single)))
+        self.assertIsNone(loaded["comparison_variable"])
+        self.assertNotIn("candidate", loaded)
+        self.assertEqual(loaded["task_id"], "orange-in-bowl")
+        self.assertEqual(validate_config(json.loads(json.dumps(loaded))), loaded)
+        with self.assertRaisesRegex(ValueError, "no candidate"):
+            validate_config({**single, "candidate": {"prompt": "put orange into the bowl", "action_limit": 24}})
+
+    def test_single_run_records_one_trial(self) -> None:
+        from unittest.mock import patch
+        import compare_replays
+        single = validate_config({"schema_version": 1, "model": "beta", "seconds": 60,
+                                  "baseline": {"prompt": "put orange into the bowl", "action_limit": 48}})
+        labels = []
+
+        def trial(folder: Path, trial_config: dict, label: str) -> Path:
+            labels.append(label)
+            return folder / label
+
+        result = {"outcome": "success", "verdict": "successed", "reason": "Placed.", "evidence_sim_s": 3.0,
+                  "replay": None}
+        with TemporaryDirectory() as directory, patch.object(compare_replays, "assess", return_value=result), \
+                redirect_stdout(io.StringIO()):
+            report = json.loads(compare_replays.run_experiment(single, Path(directory) / "x", trial).read_text())
+        self.assertEqual(labels, ["baseline"])
+        self.assertEqual((report["decision"], report["reason"]), ("single-run", "Placed."))
+        self.assertNotIn("candidate", report)
 
     def test_validation_is_idempotent(self) -> None:
         once = validate_config(config("put orange into the bowl", auto_stop_home_seconds=5))
