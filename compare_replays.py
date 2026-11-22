@@ -27,6 +27,7 @@ from dreamlabs.scene_inventory import load_inventory
 from dreamlabs.scoring import TASK, resolve_task, score, task_id, verdict
 from dreamlabs.task_parser import parse_prompt
 from dreamlabs.trajectory_quality import trajectory_quality
+from dreamlabs.yolo_status import yolo_unavailable
 
 MAX_HOME_SECONDS = 120.0
 TrialRunner = Callable[[Path, dict, str], Path]
@@ -215,9 +216,25 @@ def request_count(line: str, current: int | None) -> int | None:
 
 
 def run_yolo(recording: Path) -> None:
-    detector = [sys.executable, str(Path(__file__).resolve().with_name("detect_replay.py")), str(recording)]
-    if subprocess.run(detector, check=False).returncode:
-        print("YOLO did not complete. The simulation score is still available.", file=sys.stderr)
+    """Annotate the recording with YOLO, and note in run.json whether it worked so the replay can say why not."""
+    error = yolo_unavailable()
+    if error is None:
+        detector = [sys.executable, str(Path(__file__).resolve().with_name("detect_replay.py")), str(recording)]
+        finished = subprocess.run(detector, check=False, capture_output=True, text=True)
+        sys.stdout.write(finished.stdout)
+        sys.stderr.write(finished.stderr)
+        if finished.returncode:
+            lines = [line.strip() for line in finished.stderr.splitlines() if line.strip()]
+            error = lines[-1] if lines else f"detect_replay.py exited with code {finished.returncode}."
+    if error:
+        print(f"YOLO did not complete: {error} The simulation score is still available.", file=sys.stderr)
+    meta_path = recording / "run.json"
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        meta["yolo"] = {"status": "failed", "error": error} if error else {"status": "done"}
+        meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+    except (OSError, ValueError) as failure:
+        print(f"Could not record the YOLO status in {meta_path}: {failure}", file=sys.stderr)
 
 
 def pair_report(baseline: dict, candidate: dict) -> dict:
@@ -331,6 +348,8 @@ def main() -> None:
     args = parser.parse_args()
     if sum(bool(mode) for mode in (args.run, args.existing, args.config)) != 1:
         parser.error("Choose --run, --config CONFIG, or --existing BASELINE CANDIDATE.")
+    if args.yolo and (reason := yolo_unavailable()):
+        parser.error(f"{reason} Install it or run without --yolo.")
     overrides = (args.scene, args.prompt, args.model, args.seconds, args.baseline_actions,
                  args.candidate_actions, args.home_seconds)
     config = None

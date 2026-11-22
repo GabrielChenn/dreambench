@@ -100,6 +100,7 @@ Trajectories are solid up to this frame and faint after it.</p>
 <h2 id="video-title">Camera views</h2>
 <div class="cameras">__CAMERA_LABELS__</div>
 <div class="video-wrap"><video id="video" src="video.mp4" controls preload="metadata" muted playsinline></video><canvas id="boxes" hidden></canvas></div>
+<p class="description" id="detection-note">__DETECTION_NOTE__</p>
 </section>
 <section class="panel" aria-labelledby="frame-title">
 <h2 id="frame-title">Frame review</h2>
@@ -605,10 +606,14 @@ def _json(value) -> str:
 
 
 def replay_html(rows: list[dict], *, detections: list[dict] | None = None,
-                cameras: tuple[str, ...] = CAMERAS) -> str:
-    """Build the replay page. It needs only its sibling video.mp4; the 3D review needs the workbench."""
+                cameras: tuple[str, ...] = CAMERAS, detection_note: str | None = None) -> str:
+    """Build the replay page. It needs only its sibling video.mp4; the 3D review needs the workbench.
+    With detections, the YOLO boxes are drawn on the camera views; detection_note says where they came from or why not."""
     labels = "".join(f"<span>{escape(CAMERA_LABELS.get(camera, camera))}</span>" for camera in cameras)
+    if detection_note is None:
+        detection_note = "YOLO boxes are drawn on the camera views." if detections else ""
     replacements = {"__CSS__": "\n" + WORKBENCH_CSS + REPLAY_CSS, "__CAMERA_LABELS__": labels,
+                    "__DETECTION_NOTE__": escape(detection_note),
                     "__COLORS__": _json(CATEGORY_COLORS), "__DETECTIONS__": _json(detections), "__ROWS__": _json(rows)}
     # One pass, so recorded text that happens to contain a marker is never substituted.
     return re.sub("|".join(map(re.escape, replacements)), lambda match: replacements[match.group(0)], TEMPLATE)

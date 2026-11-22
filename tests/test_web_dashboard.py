@@ -81,6 +81,13 @@ class LocalServerTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertEqual(self.post(path, {}, origin=False)[0], 403)
 
+    def test_yolo_run_refused_when_yolo_missing(self) -> None:
+        payload = {"config": self.config("put apple into the bowl"), "confirm_api_credits": True, "yolo": True}
+        with patch("web_dashboard.yolo_unavailable", return_value="YOLO is not installed: missing weights x."):
+            status, body = self.post("/api/jobs", payload)
+        self.assertEqual(status, 400)
+        self.assertIn("Untick YOLO", body["error"])
+
     def test_stop_without_experiment_conflicts(self) -> None:
         self.assertEqual(self.post("/api/sim/stop", {})[0], 409)
 

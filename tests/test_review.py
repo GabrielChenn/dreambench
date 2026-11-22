@@ -14,6 +14,7 @@ from tempfile import TemporaryDirectory
 from dreamlabs.contact_events import COLLISIONS, contact_category
 from dreamlabs.replay_page import CATEGORY_COLORS, replay_html
 from dreamlabs.web_jobs import SimWorkspace
+from dreamlabs.yolo_status import yolo_note, yolo_unavailable
 from web_dashboard import ThreadingHTTPServer, live_replay, make_handler, recording_dir, review_camera
 
 HAS_SIM = importlib.util.find_spec("dream_examples") is not None and importlib.util.find_spec("mujoco") is not None
@@ -80,6 +81,25 @@ class ReviewRoutingTests(unittest.TestCase):
         self.assertIn(b'id="review-image"', page)
         self.assertIsNone(live_replay(self.recording / "video.mp4"))
         self.assertIsNone(live_replay(self.recording / "replay-yolo.html"))  # no detections file
+        self.assertIn(b"YOLO was not run", page)
+
+    def test_live_replay_shows_yolo_boxes_and_failures(self) -> None:
+        record = {"frame": 0, "sim_seconds": 0.0, "ran": True, "camera_size_px": [640, 480],
+                  "cameras": {"top": [{"label": "apple", "bbox_xyxy_px": [1, 2, 3, 4], "confidence": 0.9}],
+                              "left": [], "right": []}}
+        (self.recording / "run.json").write_text(json.dumps({"yolo": {"status": "failed", "error": "no <weights>"}}))
+        page = live_replay(self.recording / "replay.html").decode()
+        self.assertIn("requested for this run but failed: no &lt;weights&gt;", page)
+        (self.recording / "detections-yolo.jsonl").write_text(json.dumps(record) + "\n")
+        for name in ("replay.html", "replay-yolo.html"):  # both pages draw the boxes on the camera views
+            page = live_replay(self.recording / name).decode()
+            self.assertIn('"bbox_xyxy_px": [1, 2, 3, 4]', page)
+            self.assertIn("detection ran on 1 of 1 frames", page)
+
+    def test_yolo_unavailable_names_what_is_missing(self) -> None:
+        reason = yolo_unavailable(self.root / "missing.pt")
+        self.assertIn("missing.pt", reason)
+        self.assertEqual(yolo_note(self.recording, None), "No YOLO detections for this recording (YOLO was not run).")
 
     def test_review_endpoint_without_renderer(self) -> None:
         sim = SimWorkspace(self.root, Path(sys.executable), Path(__file__))

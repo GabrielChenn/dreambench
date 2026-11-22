@@ -17,6 +17,7 @@ from dreamlabs.scoring import verdict as judge_verdict
 from dreamlabs.task_parser import GENERIC_NOTE
 from dreamlabs.web_jobs import JobConflict, SimWorkspace
 from dreamlabs.web_theme import WORKBENCH_CSS
+from dreamlabs.yolo_status import read_detections, yolo_note, yolo_unavailable
 
 ROOT = Path(__file__).resolve().parent / "outputs"
 ARTIFACTS = {"replay.html", "replay-yolo.html", "replay-detections.html", "video.mp4"}
@@ -284,13 +285,12 @@ def live_replay(path: Path) -> bytes | None:
         return None
     try:
         rows = [json.loads(line) for line in track.read_text(encoding="utf-8").splitlines() if line.strip()]
-        detections = None
-        if path.name == "replay-yolo.html":
-            found = path.parent / "detections-yolo.jsonl"
-            if not found.is_file():
-                return None
-            detections = [json.loads(line) for line in found.read_text(encoding="utf-8").splitlines() if line.strip()]
-        return replay_html(rows, detections=detections).encode("utf-8")
+        # Both pages draw the YOLO boxes on the camera views whenever the recording has them.
+        detections = read_detections(path.parent)
+        if path.name == "replay-yolo.html" and detections is None:
+            return None
+        return replay_html(rows, detections=detections,
+                           detection_note=yolo_note(path.parent, detections)).encode("utf-8")
     except (OSError, ValueError):
         return None  # fall back to the saved page
 
@@ -342,6 +342,8 @@ def make_handler(root: Path, sim: SimWorkspace, review: ReviewRenderer | None = 
                 if payload.get("confirm_api_credits") is not True or type(payload.get("yolo")) is not bool:
                     raise ValueError("Confirm API usage and provide the run options.")
                 config = validate_config(payload.get("config"))
+                if payload["yolo"] and (reason := yolo_unavailable()):
+                    raise ValueError(f"{reason} Untick YOLO to run without it.")
                 job_id = sim.start(config, yolo=payload["yolo"])
             except ValueError as error:
                 self.json_response(400, {"error": str(error)})

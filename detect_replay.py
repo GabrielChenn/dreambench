@@ -11,10 +11,8 @@ from pathlib import Path
 
 import numpy as np
 
+from dreamlabs.yolo_status import DETECTIONS, LOCAL_DEPS, LOCAL_WEIGHTS
 
-
-LOCAL_DEPS = Path(__file__).resolve().parent / ".venv" / "yolo-deps"
-LOCAL_WEIGHTS = LOCAL_DEPS.parent / "yolo11n.pt"
 CLASSES = {"apple", "orange", "banana", "bowl", "bottle"}
 
 
@@ -109,7 +107,7 @@ def annotate(folder: Path, every: int, connection: Connection, detector: dict) -
         if next(frames, None) is not None:
             raise ValueError("Video contains additional frames without trajectory rows.")
 
-    path = folder / "detections-yolo.jsonl"
+    path = folder / DETECTIONS
     path.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
     replay = folder / "replay-yolo.html"
     write_replay(replay, rows, detections=records)
