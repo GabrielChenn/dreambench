@@ -47,7 +47,8 @@ class ReplayPageTests(unittest.TestCase):
     def test_controls_and_escaping(self) -> None:
         page = replay_html([{"frame": 0, "sim_seconds": 0.0, "note": "__ROWS__ </script><b>"}])
         for control in ('id="timeline"', 'id="events"', 'id="review-image"', 'id="next-collision"',
-                        'id="previous-collision"', 'id="follow"', 'id="contact-values"', 'id="object-values"'):
+                        'id="previous-collision"', 'id="follow"', 'id="contact-values"', 'id="object-values"',
+                        'id="play"', 'id="speed"', 'id="video"'):
             self.assertIn(control, page)
         self.assertNotIn("</script><b>", page)
         self.assertEqual(page.count("__ROWS__"), 1)  # the recorded text, not a second substitution

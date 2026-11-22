@@ -34,8 +34,12 @@ button{color:#081d19;background:var(--accent);border:1px solid transparent;font-
 button:disabled{opacity:.55;cursor:default}
 .secondary{background:#26364a;color:var(--ink)}
 output{display:block;color:var(--muted);margin-top:.5rem;font-size:.9rem;font-variant-numeric:tabular-nums}
-#timeline{width:100%;margin:.6rem 0 .2rem;accent-color:var(--accent)}
-#events{display:block;width:100%;height:96px;background:#0c131e;border:1px solid var(--line);border-radius:.45rem;cursor:pointer}
+.player{display:grid;grid-template-columns:6.5rem 1fr auto auto;align-items:center;gap:.7rem;margin-top:.7rem}
+#play{width:2.6rem;height:2.6rem;padding:0;border-radius:50%;font-size:1.05rem;flex:none}
+#timeline{width:100%;min-width:6rem;margin:0;accent-color:var(--accent)}
+.clock{color:var(--muted);font-size:.9rem;font-variant-numeric:tabular-nums;white-space:nowrap}
+.speed{display:flex;gap:.35rem;align-items:center;color:var(--muted);font-size:.875rem}
+#events{display:block;width:100%;height:96px;margin-top:.5rem;touch-action:none;background:#0c131e;border:1px solid var(--line);border-radius:.45rem;cursor:pointer}
 .review-wrap{position:relative;max-width:60rem;margin:0 auto;background:#080e17;border-radius:.55rem;overflow:hidden;aspect-ratio:4/3;touch-action:none;cursor:grab}
 .review-wrap img{display:block;width:100%;height:100%;object-fit:contain;user-select:none;-webkit-user-drag:none}
 .review-wrap p{position:absolute;inset:auto .7rem .6rem;margin:0;color:#d3e5f6;font-size:.85rem;text-shadow:0 1px 2px #000}
@@ -57,12 +61,20 @@ TEMPLATE = """<!doctype html><html lang="en"><meta charset="utf-8">
 <title>DreamBench Replay</title><style>__CSS__</style>
 <header><nav aria-label="Workbench"><strong><span>◆</span>DreamBench</strong><a id="back" hidden>Back to results</a></nav></header>
 <main><h1>Simulation replay</h1>
-<p class="description">Step through the run frame by frame: camera views, a 3D review of each frame, trajectories, and every contact.</p>
-<section class="panel" aria-labelledby="timeline-title">
-<h2 id="timeline-title">Timeline</h2>
-<output id="position" aria-live="polite"></output>
+<p class="description">Play or step through the run: a 3D review of each frame with its contact timeline, the camera views at the same moment, trajectories, and every contact.</p>
+<section class="panel" aria-labelledby="review-title">
+<h2 id="review-title">3D review</h2>
+<div class="review-wrap" id="review-wrap"><img id="review-image" alt="3D view of this frame restored from its physics snapshot"><p id="review-note">Loading the 3D review…</p></div>
+<div class="player">
+<button id="play" type="button" aria-label="Play" title="Play / pause (Space)">▶</button>
 <input id="timeline" type="range" min="0" max="0" step="1" value="0" aria-label="Frame">
-<canvas id="events" aria-label="Contacts per frame; click to jump"></canvas>
+<span id="clock" class="clock">0.00 / 0.00 s</span>
+<label class="speed">Speed <select id="speed" aria-label="Playback speed">
+<option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option>
+</select></label>
+</div>
+<canvas id="events" aria-label="Contacts per frame; click or drag to jump"></canvas>
+<output id="position" aria-live="polite"></output>
 <form id="seek-form" class="controls">
 <label>Simulation time (s)<input id="seek" type="number" min="0" step="any" required></label>
 <button id="jump" type="submit">Jump</button>
@@ -72,15 +84,6 @@ TEMPLATE = """<!doctype html><html lang="en"><meta charset="utf-8">
 <button id="next-collision" class="secondary" type="button">Next collision ⏭</button>
 </form>
 <p class="description" id="lanes-source"></p>
-</section>
-<section class="panel" aria-labelledby="video-title">
-<h2 id="video-title">Camera views</h2>
-<div class="cameras">__CAMERA_LABELS__</div>
-<div class="video-wrap"><video id="video" src="video.mp4" controls preload="metadata"></video><canvas id="boxes" hidden></canvas></div>
-</section>
-<section class="panel" aria-labelledby="review-title">
-<h2 id="review-title">3D review</h2>
-<div class="review-wrap" id="review-wrap"><img id="review-image" alt="3D view of this frame restored from its physics snapshot"><p id="review-note">Loading the 3D review…</p></div>
 <div class="toggles">
 <label>Follow <select id="follow"><option value="">Scene</option></select></label>
 <label><input id="show-contacts" type="checkbox" checked>Contacts</label>
@@ -89,8 +92,14 @@ TEMPLATE = """<!doctype html><html lang="en"><meta charset="utf-8">
 <button id="reset-view" class="secondary" type="button">Reset view</button>
 </div>
 <div class="legend" id="legend"></div>
-<p class="description">Drag to rotate, scroll to zoom. Each frame is restored from the MuJoCo state saved just before its control step.
+<p class="description">Play, drag the timeline, or click a contact lane: the 3D review and the camera views move to the same time.
+Drag the 3D view to rotate, scroll to zoom. Each frame is restored from the MuJoCo state saved just before its control step.
 Trajectories are solid up to this frame and faint after it.</p>
+</section>
+<section class="panel" aria-labelledby="video-title">
+<h2 id="video-title">Camera views</h2>
+<div class="cameras">__CAMERA_LABELS__</div>
+<div class="video-wrap"><video id="video" src="video.mp4" controls preload="metadata" muted playsinline></video><canvas id="boxes" hidden></canvas></div>
 </section>
 <section class="panel" aria-labelledby="frame-title">
 <h2 id="frame-title">Frame review</h2>
@@ -133,6 +142,8 @@ const jointNames = ['Joint 1 (°)', 'Joint 2 (°)', 'Joint 3 (°)', 'Joint 4 (°
 const DEG = 180 / Math.PI;
 let current = -1, mediaReady = false, review = null, camera = null, cameraDefault = null;
 let renderBusy = false, renderPending = false, imageUrl = null, drag = null;
+let clockPlaying = false, clockStart = null;  // playback without a camera video
+const PLAYBACK = new Set(['video', 'play']);  // sources that keep playback running
 slider.max = Math.max(0, rows.length - 1);
 
 // Where this page is served from decides whether the 3D review is available.
@@ -161,6 +172,12 @@ function isCollision(index) {
   return (frameContacts(index) ?? []).some(contact => COLLISIONS.includes(contact.category));
 }
 
+// Frame axis of the lanes in strip pixels: lined up under the slider thumb's travel.
+function stripRange() {
+  const box = strip.getBoundingClientRect(), track = slider.getBoundingClientRect(), thumb = 8;
+  if (!track.width) return [92, box.width - 4];
+  return [track.left - box.left + thumb, track.right - box.left - thumb];
+}
 function drawStrip() {
   const ratio = window.devicePixelRatio || 1;
   const width = strip.clientWidth, height = strip.clientHeight;
@@ -168,7 +185,8 @@ function drawStrip() {
   const ctx = strip.getContext('2d');
   ctx.scale(ratio, ratio);
   ctx.clearRect(0, 0, width, height);
-  const label = 92, laneHeight = height / LANES.length, span = Math.max(1, rows.length - 1);
+  const [label, right] = stripRange();
+  const laneHeight = height / LANES.length, span = Math.max(1, rows.length - 1);
   ctx.font = '11px system-ui';
   LANES.forEach((name, i) => {
     ctx.fillStyle = '#a9b8cc';
@@ -180,26 +198,38 @@ function drawStrip() {
     ctx.fillText('No contact telemetry in this recording.', label + 8, height / 2);
   }
   for (let i = 0; i < rows.length; i++) {
-    const x = label + (width - label - 4) * i / span;
+    const x = label + (right - label) * i / span;
     for (const name of lanesOf(i)) {
       const row = LANES.indexOf(name);
       if (row < 0) continue;
       ctx.fillStyle = COLORS[name];
-      ctx.fillRect(x, row * laneHeight + 2, Math.max(1, (width - label) / span), laneHeight - 4);
+      ctx.fillRect(x, row * laneHeight + 2, Math.max(1, (right - label) / span), laneHeight - 4);
     }
   }
   if (current >= 0) {
-    const x = label + (width - label - 4) * current / span;
+    const x = label + (right - label) * current / span;
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(x - 1, 0, 2, height);
   }
-  strip.dataset.label = label;
 }
-strip.addEventListener('click', event => {
-  const rect = strip.getBoundingClientRect(), label = Number(strip.dataset.label || 92);
-  const fraction = (event.clientX - rect.left - label) / (rect.width - label - 4);
-  if (fraction >= 0) setFrame(Math.round(fraction * (rows.length - 1)), 'strip');
+function stripFrame(event, clamp) {
+  const [label, right] = stripRange();
+  const fraction = (event.clientX - strip.getBoundingClientRect().left - label) / (right - label);
+  if (fraction < 0 && !clamp) return null;
+  return Math.round(Math.max(0, Math.min(1, fraction)) * (rows.length - 1));
+}
+let stripDrag = false;
+strip.addEventListener('pointerdown', event => {
+  const index = stripFrame(event, false);
+  if (index === null) return;
+  stripDrag = true;
+  strip.setPointerCapture(event.pointerId);
+  setFrame(index, 'strip');
 });
+strip.addEventListener('pointermove', event => { if (stripDrag) setFrame(stripFrame(event, true), 'strip'); });
+const endStripDrag = () => { stripDrag = false; };
+strip.addEventListener('pointerup', endStripDrag);
+strip.addEventListener('pointercancel', endStripDrag);
 window.addEventListener('resize', drawStrip);
 
 function cell(tr, text, className) {
@@ -290,8 +320,9 @@ function frameText(index) {
 function setFrame(index, source) {
   if (!rows.length) return;
   index = Math.max(0, Math.min(rows.length - 1, index));
+  if (!PLAYBACK.has(source)) stopClock();  // stepping or scrubbing pauses playback
   if (source !== 'video' && mediaReady) {
-    video.pause();
+    if (!PLAYBACK.has(source)) video.pause();
     video.currentTime = rows[index].sim_seconds + 0.001;
   }
   if (index === current) { draw(detections?.[index]); return; }
@@ -299,6 +330,7 @@ function setFrame(index, source) {
   const row = rows[index];
   slider.value = index;
   $('seek').value = row.sim_seconds.toFixed(2);
+  $('clock').textContent = row.sim_seconds.toFixed(2) + ' / ' + rows[rows.length - 1].sim_seconds.toFixed(2) + ' s';
   $('position').textContent = frameText(index);
   $('previous-frame').disabled = index <= 0;
   $('next-frame').disabled = index >= rows.length - 1;
@@ -457,6 +489,8 @@ function draw(record) {
 }
 const frameAt = seconds => Math.floor(seconds * 20 + 1e-6);
 video.addEventListener('loadedmetadata', () => {
+  const resume = clockPlaying;  // hand playback over from the wall clock to the video
+  stopClock();
   mediaReady = true;
   const requested = Number(new URLSearchParams(location.search).get('t'));
   if (rows.length && new URLSearchParams(location.search).has('t') && Number.isFinite(requested)) {
@@ -464,6 +498,7 @@ video.addEventListener('loadedmetadata', () => {
   } else {
     setFrame(Math.max(current, 0), 'sync');  // keep the frame chosen while the video loaded
   }
+  if (resume) play();
 });
 video.addEventListener('timeupdate', () => setFrame(frameAt(video.currentTime), 'video'));
 video.addEventListener('seeked', () => setFrame(frameAt(video.currentTime), 'video'));
@@ -471,6 +506,56 @@ if (video.requestVideoFrameCallback) {
   const onFrame = (_, metadata) => { setFrame(frameAt(metadata.mediaTime), 'video'); video.requestVideoFrameCallback(onFrame); };
   video.requestVideoFrameCallback(onFrame);
 }
+
+// Playback ------------------------------------------------------------------------------------
+// With the camera video loaded, the video is the clock: its frames drive the timeline and the 3D review.
+// Without it, a wall clock steps through the recorded frames at their simulation times.
+const speed = () => Number($('speed').value) || 1;
+const isPlaying = () => clockPlaying || (mediaReady && !video.paused && !video.ended);
+function showPlayState() {
+  const playing = isPlaying();
+  $('play').textContent = playing ? '❚❚' : '▶';
+  $('play').setAttribute('aria-label', playing ? 'Pause' : 'Play');
+}
+function stopClock() {
+  if (!clockPlaying) return;
+  clockPlaying = false;
+  showPlayState();
+}
+function tick(now) {
+  if (!clockPlaying) return;
+  const last = rows.length - 1;
+  const seconds = clockStart.sim + (now - clockStart.wall) / 1000 * speed();
+  let index = current;
+  while (index < last && rows[index + 1].sim_seconds <= seconds) index++;
+  setFrame(index, 'play');
+  if (index >= last) { stopClock(); return; }
+  requestAnimationFrame(tick);
+}
+function play() {
+  if (!rows.length) return;
+  if (current >= rows.length - 1) setFrame(0, 'button');  // replay from the start
+  if (mediaReady) {
+    video.playbackRate = speed();
+    video.play().catch(error => { $('review-note').textContent = 'Playback failed: ' + error.message; });
+  } else {
+    clockPlaying = true;
+    clockStart = {wall: performance.now(), sim: rows[current].sim_seconds};
+    requestAnimationFrame(tick);
+  }
+  showPlayState();
+}
+function pause() {
+  stopClock();
+  if (mediaReady) video.pause();
+  showPlayState();
+}
+$('play').onclick = () => isPlaying() ? pause() : play();
+$('speed').addEventListener('change', () => {
+  video.playbackRate = speed();
+  if (clockPlaying) clockStart = {wall: performance.now(), sim: rows[current].sim_seconds};
+});
+for (const name of ['play', 'pause', 'ended']) video.addEventListener(name, showPlayState);
 
 // Controls ------------------------------------------------------------------------------------
 slider.addEventListener('input', () => setFrame(Number(slider.value), 'slider'));
@@ -484,6 +569,10 @@ $('previous-collision').onclick = () => seekCollision(-1);
 $('next-collision').onclick = () => seekCollision(1);
 document.addEventListener('keydown', event => {
   if (event.target.matches('input[type=number], select, textarea')) return;
+  if (event.key === ' ' && !event.target.matches('button, video')) {
+    event.preventDefault();
+    isPlaying() ? pause() : play();
+  }
   if (event.key === 'ArrowLeft') { event.preventDefault(); setFrame(current - 1, 'key'); }
   if (event.key === 'ArrowRight') { event.preventDefault(); setFrame(current + 1, 'key'); }
 });
