@@ -52,6 +52,7 @@ class ReplayPageTests(unittest.TestCase):
                         'id="play"', 'id="speed"', 'id="video"', 'id="fullscreen"', 'controlslist="nofullscreen"'):
             self.assertIn(control, page)
         self.assertNotIn("</script><b>", page)
+        self.assertNotIn('id="log"', page)  # raw frame data is in the frame JSON download instead
         for view, label in (("-1", "Overview"), ("0", "Overhead"), ("1", "Left wrist"), ("2", "Right wrist")):
             self.assertIn(f'data-view="{view}" aria-pressed="false">{label}</button>', page)
         self.assertEqual(page.count("__ROWS__"), 1)  # the recorded text, not a second substitution

@@ -61,7 +61,6 @@ thead th{color:var(--muted);font-weight:650;font-size:.85rem}
 td.bad{color:#ffb2b2}
 .chip{display:inline-block;width:.65rem;height:.65rem;border-radius:50%;margin-right:.4rem;vertical-align:-.03rem}
 h3{font-size:1rem;margin:1rem 0 .2rem}
-pre{background:#0c131e;border:1px solid var(--line);color:#d3e5f6;border-radius:.55rem;padding:1rem;overflow:auto;margin:0;max-height:24rem}
 """
 
 TEMPLATE = """<!doctype html><html lang="en"><meta charset="utf-8">
@@ -132,10 +131,7 @@ Trajectories are solid up to this frame and faint after it.</p>
 <div class="controls"><button id="export-frame" type="button" class="secondary">Download frame JSON</button></div>
 <p id="reproduction" class="description"></p>
 </section>
-<section class="panel" aria-labelledby="log-title">
-<h2 id="log-title">Frame telemetry</h2>
-<pre id="log"></pre>
-</section></main>
+</main>
 <script id="rows" type="application/json">__ROWS__</script>
 <script id="detections" type="application/json">__DETECTIONS__</script>
 <script id="colors" type="application/json">__COLORS__</script>
@@ -355,11 +351,6 @@ function setFrame(index, source) {
   showJoints(row);
   showObjects(index);
   showContacts(index);
-  const {physics_before_step, ...telemetry} = row;
-  if (physics_before_step) telemetry.physics_snapshot_available = true;
-  if (detections?.[index]) telemetry.detection = detections[index];
-  if (review?.tips?.[index]) telemetry.gripper_tip_xyz_m_before_step = review.tips[index];
-  $('log').textContent = JSON.stringify(telemetry, null, 2);
   draw(detections?.[index]);
   drawStrip();
   requestRender();
@@ -653,6 +644,7 @@ $('export-frame').onclick = () => {
   const extra = {};
   if (detections?.[current]) extra.detection = detections[current];
   if (review?.contacts?.[current]) extra.contacts_before_step = review.contacts[current];
+  if (review?.tips?.[current]) extra.gripper_tip_xyz_m_before_step = review.tips[current];
   const url = URL.createObjectURL(new Blob([JSON.stringify({...row, ...extra}, null, 2)], {type: 'application/json'}));
   const a = document.createElement('a');
   a.href = url;
